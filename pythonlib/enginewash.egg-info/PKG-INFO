@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: enginewash
+Version: 0.1.0
+Summary: Engine wash effect calculator for aircraft engine condition monitoring
+Requires-Python: >=3.9
+Requires-Dist: pandas>=1.5
+Requires-Dist: numpy>=1.23
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0; extra == "dev"
+Dynamic: requires-python

@@ -1,0 +1,17 @@
+pyproject.toml
+setup.py
+enginewash/__init__.py
+enginewash/calculator.py
+enginewash/detection.py
+enginewash/models.py
+enginewash/smoothing.py
+enginewash.egg-info/PKG-INFO
+enginewash.egg-info/SOURCES.txt
+enginewash.egg-info/dependency_links.txt
+enginewash.egg-info/requires.txt
+enginewash.egg-info/top_level.txt
+tests/__init__.py
+tests/test_calculator.py
+tests/test_detection.py
+tests/test_import.py
+tests/test_smoothing.py
