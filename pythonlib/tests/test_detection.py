@@ -9,22 +9,22 @@ from enginewash.detection import compute_wash_means, detect_loss_of_efficiency
 
 class TestComputeWashMeans:
     def test_downward_trend(self):
-        """For lower-is-better (cartoonist=-1): before=min(tail), after=max(head)."""
+        """For lower-is-better (direction=-1): before=min(tail), after=max(head)."""
         before = np.array([10.0, 9.0, 8.0, 7.0, 6.0])
         after = np.array([3.0, 4.0, 5.0, 6.0, 7.0])
 
-        mean_b, mean_a, delta = compute_wash_means(before, after, n_obs=3, cartoonist=-1)
+        mean_b, mean_a, delta = compute_wash_means(before, after, n_obs=3, direction=-1)
 
         assert mean_b == 6.0   # min of [8, 7, 6]
         assert mean_a == 5.0   # max of [3, 4, 5]
         assert delta == -1.0   # 5 - 6 = -1 (improvement: lower)
 
     def test_upward_trend(self):
-        """For higher-is-better (cartoonist=+1): before=max(tail), after=min(head)."""
+        """For higher-is-better (direction=+1): before=max(tail), after=min(head)."""
         before = np.array([10.0, 8.0, 6.0, 4.0, 2.0])
         after = np.array([8.0, 9.0, 10.0, 11.0, 12.0])
 
-        mean_b, mean_a, delta = compute_wash_means(before, after, n_obs=3, cartoonist=1)
+        mean_b, mean_a, delta = compute_wash_means(before, after, n_obs=3, direction=1)
 
         assert mean_b == 6.0   # max of [6, 4, 2]
         assert mean_a == 8.0   # min of [8, 9, 10]
@@ -35,7 +35,7 @@ class TestComputeWashMeans:
         before = np.array([5.0, 4.0])
         after = np.array([3.0])
 
-        mean_b, mean_a, delta = compute_wash_means(before, after, n_obs=15, cartoonist=-1)
+        mean_b, mean_a, delta = compute_wash_means(before, after, n_obs=15, direction=-1)
 
         assert mean_b == 4.0
         assert mean_a == 3.0
@@ -45,7 +45,7 @@ class TestComputeWashMeans:
         before = np.array([])
         after = np.array([1.0, 2.0])
 
-        mean_b, mean_a, delta = compute_wash_means(before, after, n_obs=5, cartoonist=-1)
+        mean_b, mean_a, delta = compute_wash_means(before, after, n_obs=5, direction=-1)
 
         assert np.isnan(mean_b)
         assert np.isnan(delta)
@@ -58,7 +58,7 @@ class TestDetectLossOfEfficiency:
         times = pd.date_range("2024-01-01", periods=6, freq="D")
 
         time_loe = detect_loss_of_efficiency(
-            smoothed, times, mean_before=6.0, threshold=2.0, cartoonist=-1
+            smoothed, times, mean_before=6.0, threshold=2.0, direction=-1
         )
 
         # -smoothed <= -6.0 + 2.0 → smoothed >= 4.0
@@ -71,7 +71,7 @@ class TestDetectLossOfEfficiency:
         times = pd.date_range("2024-06-01", periods=5, freq="D")
 
         time_loe = detect_loss_of_efficiency(
-            smoothed, times, mean_before=12.0, threshold=2.0, cartoonist=1
+            smoothed, times, mean_before=12.0, threshold=2.0, direction=1
         )
 
         # 1*smoothed <= 1*12.0 + 2.0 → smoothed <= 14.0
@@ -85,7 +85,7 @@ class TestDetectLossOfEfficiency:
         times = pd.date_range("2024-01-01", periods=4, freq="D")
 
         time_loe = detect_loss_of_efficiency(
-            smoothed, times, mean_before=6.0, threshold=2.0, cartoonist=-1
+            smoothed, times, mean_before=6.0, threshold=2.0, direction=-1
         )
 
         assert time_loe is None
@@ -95,5 +95,5 @@ class TestDetectLossOfEfficiency:
         times = pd.date_range("2024-01-01", periods=2, freq="D")
 
         assert detect_loss_of_efficiency(
-            smoothed, times, mean_before=np.nan, threshold=1.0, cartoonist=-1
+            smoothed, times, mean_before=np.nan, threshold=1.0, direction=-1
         ) is None

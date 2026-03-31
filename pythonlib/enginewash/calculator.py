@@ -1,19 +1,19 @@
 """Engine wash effect calculator.
 
-Ported from old ECM portal R code to Python.  
-This is a pure computation library — it takes DataFrames as input
+Ported from old ECM portal R code to Python.
+This is a pure computation library — it takes lists of dataclasses as input
 and returns results. Database access is the caller's responsibility.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+import dataclasses
 
 import numpy as np
 import pandas as pd
 
 from .detection import compute_wash_means, detect_loss_of_efficiency
-from .models import WashConfig, WashEvent, WashParameter, WashResult
+from .models import FlightRecord, MaintenanceRecord, WashConfig, WashEvent, WashParameter, WashResult
 from .smoothing import smooth_series
 
 
@@ -26,14 +26,13 @@ class WashCalculator:
       3. Smooth parameter values per segment
       4. Compute before/after wash deltas
       5. Detect loss-of-efficiency points
-      6. Optionally enrich with utilization data (TAH/TAC)
 
     Usage::
 
         calc = WashCalculator(config=WashConfig())
         result = calc.process(
-            flights_df=flights,
-            maintenance_df=maintenance,
+            flights=[FlightRecord(...)],
+            maintenance=[MaintenanceRecord(...)],
             parameter=EGTHDM,
         )
         # result.df        — annotated time series
@@ -46,47 +45,39 @@ class WashCalculator:
 
     def process(
         self,
-        flights_df: pd.DataFrame,
-        maintenance_df: pd.DataFrame,
+        flights: list[FlightRecord],
+        maintenance: list[MaintenanceRecord],
         parameter: WashParameter,
-        utilization_df: pd.DataFrame | None = None,
     ) -> WashResult:
         """Run the full wash-effect analysis for one parameter.
 
         Args:
-            flights_df: Flight records with columns:
-                - engine_id: str
-                - flight_datetime: datetime
-                - float_value: float (raw parameter value)
-                - float_value_smooth: float (pre-smoothed value, optional)
-            maintenance_df: Wash events with columns:
-                - engine_id: str
-                - maint_datetime: datetime
-                - ata_code: str
+            flights: Flight records, one per flight.
+            maintenance: Wash/maintenance events.
             parameter: Parameter configuration.
-            utilization_df: Optional utilization data with columns:
-                - engine_id: str
-                - flight_datetime: datetime
-                - tah: float (total air hours)
-                - tac: float (total air cycles)
 
         Returns:
             WashResult with annotated DataFrame, events list, and summary.
         """
+        flights_df = pd.DataFrame([dataclasses.asdict(f) for f in flights])
+        maintenance_df = (
+            pd.DataFrame([dataclasses.asdict(m) for m in maintenance])
+            if maintenance
+            else pd.DataFrame(columns=["engine_id", "maint_datetime", "ata_code"])
+        )
         df = self._prepare_data(flights_df, maintenance_df)
         df = self._segment_events(df)
         df = self._apply_smoothing(df, parameter)
         df, events = self._compute_deltas(df, parameter)
-        df_event = self._build_event_table(df, events, parameter, utilization_df)
+        df_event = self._build_event_table(events, parameter)
 
         return WashResult(df=df, events=events, df_event=df_event)
 
     def process_all(
         self,
-        flights_df: pd.DataFrame,
-        maintenance_df: pd.DataFrame,
+        flights: list[FlightRecord],
+        maintenance: list[MaintenanceRecord],
         parameters: list[WashParameter] | None = None,
-        utilization_df: pd.DataFrame | None = None,
     ) -> WashResult:
         """Run wash-effect analysis for all configured parameters and merge.
 
@@ -94,10 +85,9 @@ class WashCalculator:
         into a single summary (one row per wash, columns for each parameter).
 
         Args:
-            flights_df: Flight records (see process() for schema).
-            maintenance_df: Wash events (see process() for schema).
+            flights: Flight records (see process() for schema).
+            maintenance: Wash/maintenance events (see process() for schema).
             parameters: Parameters to analyze. Defaults to config.parameters.
-            utilization_df: Optional utilization data.
 
         Returns:
             WashResult with merged df_event across all parameters.
@@ -109,10 +99,9 @@ class WashCalculator:
 
         for param in params:
             result = self.process(
-                flights_df=flights_df,
-                maintenance_df=maintenance_df,
+                flights=flights,
+                maintenance=maintenance,
                 parameter=param,
-                utilization_df=utilization_df,
             )
             all_events.extend(result.events)
             if not result.df_event.empty:
@@ -134,8 +123,6 @@ class WashCalculator:
 
         return WashResult(df=last_df, events=all_events, df_event=merged)
 
-    # ── Step 1: Prepare data and anchor wash events ──
-
     def _prepare_data(
         self, flights_df: pd.DataFrame, maintenance_df: pd.DataFrame
     ) -> pd.DataFrame:
@@ -147,12 +134,12 @@ class WashCalculator:
         df["flight_datetime"] = pd.to_datetime(df["flight_datetime"])
         df = df.sort_values(["engine_id", "flight_datetime"]).reset_index(drop=True)
 
-        # Ensure smooth column exists
         if "float_value_smooth" not in df.columns:
             df["float_value_smooth"] = df["float_value"]
 
-        # Fill missing smooth with raw
-        df["float_value_smooth"] = df["float_value_smooth"].fillna(df["float_value"])
+        # Fill missing smooth with raw; infer_objects suppresses pandas FutureWarning
+        # about silent dtype downcasting during fillna
+        df["float_value_smooth"] = df["float_value_smooth"].fillna(df["float_value"]).infer_objects(copy=False)
 
         # Mark wash events
         df["event"] = 0
@@ -178,8 +165,6 @@ class WashCalculator:
 
         return df
 
-    # ── Step 2: Event segmentation ──
-
     def _segment_events(self, df: pd.DataFrame) -> pd.DataFrame:
         """Create cumulative event index per engine.
 
@@ -189,8 +174,6 @@ class WashCalculator:
         df = df.sort_values(["engine_id", "flight_datetime"]).reset_index(drop=True)
         df["event_cum"] = df.groupby("engine_id")["event"].cumsum()
         return df
-
-    # ── Step 3: Smoothing ──
 
     def _apply_smoothing(
         self, df: pd.DataFrame, parameter: WashParameter
@@ -208,8 +191,6 @@ class WashCalculator:
 
         return df
 
-    # ── Step 4: Wash delta calculation + loss-of-efficiency ──
-
     def _compute_deltas(
         self, df: pd.DataFrame, parameter: WashParameter
     ) -> tuple[pd.DataFrame, list[WashEvent]]:
@@ -223,7 +204,7 @@ class WashCalculator:
         df["time_loss_of_efficiency"] = pd.NaT
         df["efficient_treatment"] = np.nan
 
-        cart = parameter.cartoonist
+        cart = parameter.direction
 
         for eid, eng_df in df.groupby("engine_id"):
             max_seg = int(eng_df["event_cum"].max())
@@ -294,14 +275,10 @@ class WashCalculator:
 
         return df, events
 
-    # ── Step 5: Build event summary table ──
-
     def _build_event_table(
         self,
-        df: pd.DataFrame,
         events: list[WashEvent],
         parameter: WashParameter,
-        utilization_df: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
         """Build summary DataFrame from wash events."""
         if not events:
@@ -311,6 +288,11 @@ class WashCalculator:
 
         records = []
         for ev in events:
+            days_loe = (
+                (ev.time_loss_of_efficiency - ev.maint_datetime).days
+                if ev.has_loss and pd.notna(ev.maint_datetime)
+                else None
+            )
             rec = {
                 "engine_id": ev.engine_id,
                 "event_index": ev.event_index,
@@ -320,66 +302,8 @@ class WashCalculator:
                 f"mean_{suffix}_before_wash": ev.mean_before,
                 f"mean_{suffix}_after_wash": ev.mean_after,
                 f"date_loe_{suffix}": ev.time_loss_of_efficiency,
+                f"days_loe_{suffix}": days_loe,
             }
-
-            # Utilization enrichment
-            if utilization_df is not None and ev.has_loss:
-                rec.update(
-                    self._compute_utilization(
-                        utilization_df,
-                        ev.engine_id,
-                        ev.maint_datetime,
-                        ev.time_loss_of_efficiency,
-                        suffix,
-                    )
-                )
-
             records.append(rec)
 
         return pd.DataFrame(records)
-
-    def _compute_utilization(
-        self,
-        util_df: pd.DataFrame,
-        engine_id: str,
-        wash_dt: pd.Timestamp,
-        loe_dt: pd.Timestamp,
-        suffix: str,
-    ) -> dict:
-        """Compute cycles and hours between wash and loss-of-efficiency.
-
-        Looks up TAH/TAC at both wash date and loss date,
-        returns the difference.
-        """
-        edf = util_df[util_df["engine_id"] == engine_id].copy()
-        edf["flight_datetime"] = pd.to_datetime(edf["flight_datetime"])
-        edf = edf.sort_values("flight_datetime")
-
-        result = {}
-
-        tac_wash = self._lookup_util(edf, wash_dt, "tac")
-        tac_loe = self._lookup_util(edf, loe_dt, "tac")
-        tah_wash = self._lookup_util(edf, wash_dt, "tah")
-        tah_loe = self._lookup_util(edf, loe_dt, "tah")
-
-        if tac_wash is not None and tac_loe is not None:
-            result[f"cyc_loe_{suffix}"] = tac_loe - tac_wash
-
-        if tah_wash is not None and tah_loe is not None:
-            result[f"hrs_loe_{suffix}"] = (tah_loe - tah_wash) / 60.0
-
-        if wash_dt is not pd.NaT and loe_dt is not pd.NaT:
-            result[f"days_loe_{suffix}"] = (loe_dt - wash_dt).days
-
-        return result
-
-    @staticmethod
-    def _lookup_util(
-        edf: pd.DataFrame, dt: pd.Timestamp, col: str
-    ) -> Optional[float]:
-        """Find the utilization value closest to a given datetime."""
-        if edf.empty or pd.isna(dt):
-            return None
-        idx = (edf["flight_datetime"] - dt).abs().idxmin()
-        val = edf.loc[idx, col]
-        return float(val) if pd.notna(val) else None

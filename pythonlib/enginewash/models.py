@@ -19,14 +19,45 @@ class FlightPhase(Enum):
 
 class TrendDirection(Enum):
     """Direction indicating whether higher or lower values are better.
-
-    The 'cartoonist' parameter from the R implementation:
+      Meaning:
       UP   (+1) = higher is better (e.g., EGT margin)
       DOWN (-1) = lower is better  (e.g., fuel flow, differential EGT)
     """
 
     UP = 1
     DOWN = -1
+
+
+@dataclass
+class FlightRecord:
+    """A single flight data point for one engine.
+
+    Attributes:
+        engine_id: Engine identifier.
+        flight_datetime: Timestamp of the flight.
+        float_value: Raw parameter value.
+        float_value_smooth: Pre-smoothed value from DB (optional; falls back to float_value).
+    """
+
+    engine_id: str
+    flight_datetime: pd.Timestamp
+    float_value: float
+    float_value_smooth: Optional[float] = None
+
+
+@dataclass
+class MaintenanceRecord:
+    """A single wash/maintenance event.
+
+    Attributes:
+        engine_id: Engine identifier.
+        maint_datetime: Timestamp of the maintenance event.
+        ata_code: ATA code of the maintenance event.
+    """
+
+    engine_id: str
+    maint_datetime: pd.Timestamp
+    ata_code: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -46,8 +77,8 @@ class WashParameter:
     threshold: float = 2.0
 
     @property
-    def cartoonist(self) -> int:
-        """Return the numeric cartoonist value (+1 or -1)."""
+    def direction(self) -> int:
+        """Return the numeric direction value (+1 or -1)."""
         return self.trend_direction.value
 
     @property
@@ -56,7 +87,6 @@ class WashParameter:
         return f"{self.name}_{self.flight_phase.value}"
 
 
-# Pre-configured standard parameters
 GWFM = WashParameter(
     name="GWFM",
     flight_phase=FlightPhase.CRUISE,
@@ -83,10 +113,10 @@ DEFAULT_PARAMETERS = [GWFM, DEGT, EGTHDM]
 
 @dataclass
 class WashConfig:
-    """Configuration for the wash effect calculation.
+    """Configuration for the wash module
 
     Attributes:
-        smooth_window: Number of flights for the centered running mean.
+        smooth_window: Number of flights for smoothing.
         n_obs_mean: Number of observations for before/after wash mean.
         parameters: List of parameters to analyze.
     """
@@ -101,15 +131,15 @@ class WashEvent:
     """Result for a single wash event on a single parameter.
 
     Attributes:
-        engine_id: Engine identifier.
-        event_index: Cumulative event index (1-based).
-        maint_datetime: Maintenance event timestamp.
-        ata_code: ATA chapter code of the wash work order.
-        parameter: The analyzed parameter config.
-        mean_before: Worst smoothed value in last N obs before wash.
-        mean_after: Best smoothed value in first N obs after wash.
-        delta: After minus before (sign depends on trend direction).
-        time_loss_of_efficiency: Timestamp when benefit wore off, or None.
+        engine_id: Engine identifier
+        event_index: Cumulative event index (starting from 1)
+        maint_datetime: Maintenance event timestamp
+        ata_code: ATA code of the maintenance event
+        parameter: The analyzed parameter config
+        mean_before: Worst smoothed value in last N obs before wash
+        mean_after: Best smoothed value in first N obs after wash
+        delta: After minus before (sign depends on trend direction)
+        time_loss_of_efficiency: Timestamp when benefit wore off, or None
     """
 
     engine_id: str
@@ -133,8 +163,8 @@ class WashResult:
     """Complete result of wash effect analysis.
 
     Attributes:
-        df: Full time-series DataFrame with smoothed values and annotations.
-        events: List of WashEvent results per wash per parameter.
+        df: Full time-series DataFrame with smoothed values and annotations
+        events: List of WashEvent results per wash per parameter
         df_event: Summary DataFrame of wash events (one row per wash,
             columns for each parameter's delta and loss-of-efficiency metrics).
     """

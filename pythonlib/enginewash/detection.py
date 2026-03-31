@@ -17,17 +17,17 @@ def compute_wash_means(
     before_segment: np.ndarray,
     after_segment: np.ndarray,
     n_obs: int,
-    cartoonist: int,
+    direction: int,
 ) -> tuple[float, float, float]:
     """Compute before-wash and after-wash reference values.
 
-    For downward-trend parameters (cartoonist=-1, lower is better):
+    For downward-trend parameters (direction=-1, lower is better):
         before = min of last n_obs (worst = highest before wash)
         after  = max of first n_obs (best = lowest, but we take max of the
                  smoothed first-N which represents the recovery peak)
 
     Wait — let me re-read the R code carefully. The R code does:
-        cartoonist=-1 (lower is better):
+        direction=-1 (lower is better):
             mean_before = min(tail(smooth, n_obs))  → lowest in last N before
             mean_after  = max(head(smooth, n_obs))  → highest in first N after
 
@@ -40,7 +40,7 @@ def compute_wash_means(
     The delta = after - before. For GWFM (lower=better), if wash helped,
     after < before, so delta < 0 (negative = improvement).
 
-    For EGTHDM (higher=better, cartoonist=+1):
+    For EGTHDM (higher=better, direction=+1):
         mean_before = max(tail(smooth, n_obs)) → highest before (worst margin)
         mean_after  = min(head(smooth, n_obs)) → lowest after (worst of improved)
         delta = after - before → positive = improvement
@@ -49,7 +49,7 @@ def compute_wash_means(
         before_segment: Smoothed values from end of previous segment.
         after_segment: Smoothed values from start of current segment.
         n_obs: Number of observations to consider.
-        cartoonist: +1 (higher=better) or -1 (lower=better).
+        direction: +1 (higher=better) or -1 (lower=better).
 
     Returns:
         Tuple of (mean_before, mean_after, delta).
@@ -63,7 +63,7 @@ def compute_wash_means(
     if len(tail_valid) == 0 or len(head_valid) == 0:
         return np.nan, np.nan, np.nan
 
-    if cartoonist == -1:
+    if direction == -1:
         mean_before = float(np.min(tail_valid))
         mean_after = float(np.max(head_valid))
     else:
@@ -79,19 +79,19 @@ def detect_loss_of_efficiency(
     timestamps: np.ndarray | pd.DatetimeIndex,
     mean_before: float,
     threshold: float,
-    cartoonist: int,
+    direction: int,
 ) -> Optional[pd.Timestamp]:
     """Detect when the wash benefit wears off.
 
     Scans the post-wash smoothed series for the first point where:
-        cartoonist * smoothed <= cartoonist * mean_before + threshold
+        direction * smoothed <= direction * mean_before + threshold
 
-    For downward-trend (cartoonist=-1):
+    For downward-trend (direction=-1):
         -smoothed <= -mean_before + threshold
         → smoothed >= mean_before - threshold
         i.e., value rises back to near pre-wash level
 
-    For upward-trend (cartoonist=+1):
+    For upward-trend (direction=+1):
         smoothed <= mean_before + threshold
         i.e., value drops back to near pre-wash level
 
@@ -100,7 +100,7 @@ def detect_loss_of_efficiency(
         timestamps: Corresponding timestamps.
         mean_before: Pre-wash reference level.
         threshold: Tolerance band for detecting loss.
-        cartoonist: +1 or -1.
+        direction: +1 or -1.
 
     Returns:
         Timestamp of first loss-of-efficiency point, or None.
@@ -108,8 +108,8 @@ def detect_loss_of_efficiency(
     if np.isnan(mean_before):
         return None
 
-    check = cartoonist * smoothed
-    boundary = cartoonist * mean_before + threshold
+    check = direction * smoothed
+    boundary = direction * mean_before + threshold
 
     loss_mask = check <= boundary
     indices = np.where(loss_mask)[0]

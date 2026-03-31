@@ -1,105 +1,105 @@
-# enginewash
+# pywash
 
-Python library for calculating engine wash effects on aircraft engine parameters. Port of the `CalculatorHistory_v2` R6 class to pure Python.
+Python-библиотека для расчёта эффекта промывки авиационных двигателей по параметрам технического состояния. Портирование класса `CalculatorHistory_v2` с R6 на чистый Python.
 
-## Structure
+## Структура
 
 ```
-enginewash/
-├── __init__.py             # Public API exports
-├── models.py               # WashParameter, WashEvent, WashResult, enums, presets
-├── smoothing.py            # Centered running mean (equivalent to caTools::runmean)
-├── detection.py            # Before/after delta + loss-of-efficiency detection
-└── calculator.py           # WashCalculator — full processing pipeline
+pywash/
+├── __init__.py             # Экспорт публичного API
+├── models.py               # WashParameter, WashEvent, WashResult, перечисления, пресеты
+├── smoothing.py            # Центрированное скользящее среднее (аналог caTools::runmean)
+├── detection.py            # Расчёт дельты до/после промывки и обнаружение потери эффективности
+└── calculator.py           # WashCalculator — полный конвейер обработки
 ```
 
-## Processing pipeline
+## Конвейер обработки
 
-Same as the R implementation:
+Соответствует реализации на R:
 
-1. **Prepare** — anchor wash events to the first flight after each maintenance datetime
-2. **Segment** — `event_cum = cumsum(event)` splits each engine's time series into segments (0 = pre-first-wash, 1 = between wash 1 and 2, etc.)
-3. **Smooth** — centered running mean (default window = 30 flights) within each segment
-4. **Compute deltas** — before-wash vs after-wash reference values using worst/best of last/first N observations
-5. **Detect loss-of-efficiency** — find the first flight where the smoothed value returns to within threshold of the pre-wash level
-6. **Build event table** — one row per wash with delta, LoE date, and optional utilization metrics (cycles/hours)
+1. **Подготовка** — привязка событий промывки к первому полёту после даты технического обслуживания
+2. **Сегментация** — `event_cum = cumsum(event)` разбивает временной ряд каждого двигателя на сегменты (0 = до первой промывки, 1 = между первой и второй промывками и т.д.)
+3. **Сглаживание** — центрированное скользящее среднее (окно по умолчанию = 30 полётов) в пределах каждого сегмента
+4. **Расчёт дельт** — опорные значения до и после промывки по худшему/лучшему из последних/первых N наблюдений
+5. **Обнаружение потери эффективности** — поиск первого полёта, в котором сглаженное значение возвращается в зону порогового отклонения от уровня до промывки
+6. **Формирование таблицы событий** — одна строка на промывку: дельта, дата потери эффективности, опциональные метрики налёта (циклы/часы)
 
-## Parameters
+## Параметры
 
-Three pre-configured engine parameters are included:
+В библиотеке предусмотрены три преднастроенных параметра двигателя:
 
-| Constant | Parameter | Flight Phase | Trend | Threshold | Meaning |
-|----------|-----------|-------------|-------|-----------|---------|
-| `GWFM` | GWFM | CRUISE | DOWN (-1) | 0.05 | Fuel flow — lower is better |
-| `DEGT` | DEGT | CRUISE | DOWN (-1) | 2.0 | Differential EGT — lower is better |
-| `EGTHDM` | EGTHDM | TAKEOFF | UP (+1) | 2.0 | EGT margin — higher is better |
+| Константа | Параметр | Фаза полёта | Направление | Порог | Описание                                  |
+| --------- | -------- | ----------- | ----------- | ----- | ----------------------------------------- |
+| `GWFM`    | GWFM     | CRUISE      | DOWN (-1)   | 0.05  | Расход топлива — чем ниже, тем лучше      |
+| `DEGT`    | DEGT     | CRUISE      | DOWN (-1)   | 2.0   | Дифференциальная ТГТ — чем ниже, тем лучше |
+| `EGTHDM`  | EGTHDM   | TAKEOFF     | UP (+1)     | 2.0   | Запас по ТГТ — чем выше, тем лучше        |
 
-The `TrendDirection` (cartoonist) makes the same algorithm work for parameters with opposite "good direction".
+`TrendDirection` обобщает алгоритм так, чтобы он одинаково работал для параметров с противоположным «направлением улучшения».
 
-## Design
+## Архитектура
 
-- **Pure Python** — no C/Cython bindings, no compilation step
-- **DB-free** — takes pandas DataFrames as input; the caller handles data access
-- **pandas/numpy** only runtime dependencies
+- **Чистый Python** — без C/Cython-расширений и шага компиляции
+- **Без зависимости от БД** — принимает на вход pandas DataFrame; доступ к данным остаётся на стороне вызывающего кода
+- **Зависимости времени выполнения** — только pandas и numpy
 
-## Install
+## Установка
 
 ```bash
 cd pythonlib
 pip install -e .
 ```
 
-With dev dependencies (pytest):
+С зависимостями для разработки (pytest):
 
 ```bash
 pip install -e ".[dev]"
 ```
 
-## Test
+## Тесты
 
 ```bash
 cd pythonlib
 python -m pytest tests/ -v
 ```
 
-## Usage
+## Использование
 
 ```python
 import pandas as pd
-from enginewash import WashCalculator, WashConfig, GWFM, DEGT, EGTHDM
+from pywash import WashCalculator, WashConfig, GWFM, DEGT, EGTHDM
 
-# Flight records — one row per flight per engine
+# Записи о полётах — одна строка на полёт на двигатель
 flights_df = pd.DataFrame({
     "engine_id":          [...],
     "flight_datetime":    [...],
-    "float_value":        [...],  # raw parameter value
-    "float_value_smooth": [...],  # pre-smoothed value (optional, falls back to raw)
+    "float_value":        [...],  # сырое значение параметра
+    "float_value_smooth": [...],  # предсглаженное значение (опционально, fallback на сырое)
 })
 
-# Maintenance wash events
+# События технического обслуживания (промывки)
 maintenance_df = pd.DataFrame({
     "engine_id":      [...],
     "maint_datetime": [...],
-    "ata_code":       [...],  # e.g. "206", "207", "209"
+    "ata_code":       [...],  # например, "206", "207", "209"
 })
 
-# Single parameter
+# Один параметр
 calc = WashCalculator(WashConfig(smooth_window=30, n_obs_mean=15))
 result = calc.process(flights_df, maintenance_df, parameter=GWFM)
 
-result.df         # Full time series with smoothed values and annotations
-result.events     # List of WashEvent objects
-result.df_event   # Summary DataFrame (one row per wash)
+result.df         # Полный временной ряд со сглаженными значениями и аннотациями
+result.events     # Список объектов WashEvent
+result.df_event   # Сводный DataFrame (одна строка на промывку)
 
-# All three parameters at once — merges event tables
+# Все три параметра сразу — таблицы событий объединяются
 result = calc.process_all(flights_df, maintenance_df, parameters=[GWFM, DEGT, EGTHDM])
-# result.df_event has columns: delta_GWFM_CRUISE, delta_DEGT_CRUISE, delta_EGTHDM_TAKEOFF, ...
+# result.df_event содержит колонки: delta_GWFM_CRUISE, delta_DEGT_CRUISE, delta_EGTHDM_TAKEOFF, ...
 ```
 
-### Custom parameters
+### Пользовательские параметры
 
 ```python
-from enginewash import WashParameter, FlightPhase, TrendDirection
+from pywash import WashParameter, FlightPhase, TrendDirection
 
 my_param = WashParameter(
     name="N1VIB",
@@ -110,18 +110,18 @@ my_param = WashParameter(
 result = calc.process(flights_df, maintenance_df, parameter=my_param)
 ```
 
-### Utilization enrichment
+### Обогащение данными о налёте
 
-Pass a utilization DataFrame to get cycles/hours between wash and loss-of-efficiency:
+Для получения количества циклов и часов между промывкой и потерей эффективности передайте DataFrame с данными о налёте:
 
 ```python
 utilization_df = pd.DataFrame({
     "engine_id":      [...],
     "flight_datetime": [...],
-    "tac":            [...],  # total air cycles
-    "tah":            [...],  # total air hours (minutes)
+    "tac":            [...],  # суммарное количество циклов (TAC)
+    "tah":            [...],  # суммарный налёт в минутах (TAH)
 })
 
 result = calc.process(flights_df, maintenance_df, GWFM, utilization_df=utilization_df)
-# result.df_event gains columns: cyc_loe_GWFM_CRUISE, hrs_loe_GWFM_CRUISE, days_loe_GWFM_CRUISE
+# result.df_event получает колонки: cyc_loe_GWFM_CRUISE, hrs_loe_GWFM_CRUISE, days_loe_GWFM_CRUISE
 ```

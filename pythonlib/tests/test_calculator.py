@@ -4,27 +4,24 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from enginewash import EGTHDM, GWFM, WashCalculator, WashConfig
+from enginewash import EGTHDM, GWFM, FlightRecord, MaintenanceRecord, WashCalculator, WashConfig
 
 
-def make_flights(engine_id: str, n: int, base_values: list[float]) -> pd.DataFrame:
+def make_flights(engine_id: str, n: int, base_values: list[float]) -> list[FlightRecord]:
     """Generate synthetic flight data."""
     dates = pd.date_range("2024-01-01", periods=n, freq="D")
     values = np.interp(np.arange(n), np.linspace(0, n - 1, len(base_values)), base_values)
-    return pd.DataFrame({
-        "engine_id": engine_id,
-        "flight_datetime": dates,
-        "float_value": values,
-        "float_value_smooth": values,
-    })
+    return [
+        FlightRecord(engine_id=engine_id, flight_datetime=dt, float_value=float(v), float_value_smooth=float(v))
+        for dt, v in zip(dates, values)
+    ]
 
 
-def make_maintenance(engine_id: str, dates: list[str], ata_codes: list[str]) -> pd.DataFrame:
-    return pd.DataFrame({
-        "engine_id": engine_id,
-        "maint_datetime": pd.to_datetime(dates),
-        "ata_code": ata_codes,
-    })
+def make_maintenance(engine_id: str, dates: list[str], ata_codes: list[str]) -> list[MaintenanceRecord]:
+    return [
+        MaintenanceRecord(engine_id=engine_id, maint_datetime=pd.Timestamp(dt), ata_code=ata)
+        for dt, ata in zip(dates, ata_codes)
+    ]
 
 
 class TestWashCalculator:
@@ -36,12 +33,10 @@ class TestWashCalculator:
         post = np.linspace(4.0, 6.0, 50)
         values = np.concatenate([pre, post])
         dates = pd.date_range("2024-01-01", periods=100, freq="D")
-        flights = pd.DataFrame({
-            "engine_id": "ENG001",
-            "flight_datetime": dates,
-            "float_value": values,
-            "float_value_smooth": values,
-        })
+        flights = [
+            FlightRecord(engine_id="ENG001", flight_datetime=dt, float_value=float(v), float_value_smooth=float(v))
+            for dt, v in zip(dates, values)
+        ]
         # Wash happens between day 50 and 51
         maint = make_maintenance("ENG001", ["2024-02-20"], ["206"])
 
@@ -63,12 +58,10 @@ class TestWashCalculator:
         post = np.linspace(18.0, 14.0, 50)
         values = np.concatenate([pre, post])
         dates = pd.date_range("2024-01-01", periods=100, freq="D")
-        flights = pd.DataFrame({
-            "engine_id": "ENG002",
-            "flight_datetime": dates,
-            "float_value": values,
-            "float_value_smooth": values,
-        })
+        flights = [
+            FlightRecord(engine_id="ENG002", flight_datetime=dt, float_value=float(v), float_value_smooth=float(v))
+            for dt, v in zip(dates, values)
+        ]
         maint = make_maintenance("ENG002", ["2024-02-20"], ["207"])
 
         calc = WashCalculator(WashConfig(smooth_window=5, n_obs_mean=5))
@@ -81,7 +74,7 @@ class TestWashCalculator:
     def test_no_maintenance_events(self):
         """No washes → no events, original df returned."""
         flights = make_flights("ENG003", 50, [10.0, 10.0])
-        maint = pd.DataFrame(columns=["engine_id", "maint_datetime", "ata_code"])
+        maint: list[MaintenanceRecord] = []
 
         calc = WashCalculator()
         result = calc.process(flights, maint, GWFM)
@@ -91,14 +84,12 @@ class TestWashCalculator:
 
     def test_multiple_engines(self):
         """Each engine processed independently."""
-        f1 = make_flights("ENG_A", 60, [5.0, 7.0, 4.0, 6.0])
-        f2 = make_flights("ENG_B", 60, [10.0, 12.0, 8.0, 11.0])
-        flights = pd.concat([f1, f2], ignore_index=True)
+        flights = make_flights("ENG_A", 60, [5.0, 7.0, 4.0, 6.0]) + make_flights("ENG_B", 60, [10.0, 12.0, 8.0, 11.0])
 
-        maint = pd.concat([
-            make_maintenance("ENG_A", ["2024-02-01"], ["206"]),
-            make_maintenance("ENG_B", ["2024-02-15"], ["209"]),
-        ], ignore_index=True)
+        maint = (
+            make_maintenance("ENG_A", ["2024-02-01"], ["206"]) +
+            make_maintenance("ENG_B", ["2024-02-15"], ["209"])
+        )
 
         calc = WashCalculator(WashConfig(smooth_window=5, n_obs_mean=5))
         result = calc.process(flights, maint, GWFM)
@@ -138,6 +129,7 @@ class TestWashCalculator:
             "engine_id", "event_index", "maint_datetime", "ata_code",
             "delta_GWFM_CRUISE", "mean_GWFM_CRUISE_before_wash",
             "mean_GWFM_CRUISE_after_wash", "date_loe_GWFM_CRUISE",
+            "days_loe_GWFM_CRUISE",
         }
         assert expected_cols.issubset(set(result.df_event.columns))
 
@@ -157,7 +149,7 @@ class TestWashCalculator:
     def test_smoothed_column_present(self):
         """Output df contains the custom smoothed column."""
         flights = make_flights("ENG007", 50, [1.0, 5.0])
-        maint = pd.DataFrame(columns=["engine_id", "maint_datetime", "ata_code"])
+        maint: list[MaintenanceRecord] = []
 
         calc = WashCalculator()
         result = calc.process(flights, maint, GWFM)

@@ -1,6 +1,4 @@
 """Smoothing utilities for engine parameter time series.
-
-Provides a centered running mean equivalent to caTools::runmean() in R.
 """
 
 from __future__ import annotations
@@ -10,17 +8,17 @@ import pandas as pd
 
 
 def running_mean(values: pd.Series | np.ndarray, window: int = 30) -> np.ndarray:
-    """Centered running mean, equivalent to caTools::runmean(x, k, align="center").
+    """Centered running mean
 
     At the edges where the full window is not available, the mean is computed
-    over the available observations (shrinking window), matching caTools behavior.
+    over the available observations (smaller window)
 
     Args:
-        values: Input time series.
-        window: Window size (number of observations).
+        values: Input series.
+        window: Window size
 
     Returns:
-        Array of smoothed values, same length as input.
+        numpy array of smoothed values, same length as input.
     """
     arr = np.asarray(values, dtype=np.float64)
     n = len(arr)
@@ -45,18 +43,15 @@ def smooth_series(
     window: int = 30,
     fallback: pd.Series | None = None,
 ) -> np.ndarray:
-    """Smooth a parameter series, optionally filling gaps from a fallback.
-
-    Equivalent to process_params_smooth in the R implementation:
-    applies running_mean per segment, then fills NaN from fallback (raw values).
+    """Smooth a parameter series, optionally filling NaN from fallback.
 
     Args:
-        values: Pre-smoothed or raw parameter values.
-        window: Smoothing window size.
-        fallback: Raw values to fill where smoothed values are NaN.
+        values: Pre-smoothed or raw values
+        window: Smoothing window size
+        fallback: Raw values to fill where smoothed values are NaN
 
     Returns:
-        Smoothed array with NaN gaps filled from fallback where available.
+        Smoothed array with gaps filled
     """
     smoothed = running_mean(values, window)
 
