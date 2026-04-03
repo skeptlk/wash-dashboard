@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import Optional
-
-import numpy as np
-import pandas as pd
 
 
 class FlightPhase(Enum):
@@ -40,7 +38,7 @@ class FlightRecord:
     """
 
     engine_id: str
-    flight_datetime: pd.Timestamp
+    flight_datetime: datetime
     float_value: float
     float_value_smooth: Optional[float] = None
 
@@ -56,7 +54,7 @@ class MaintenanceRecord:
     """
 
     engine_id: str
-    maint_datetime: pd.Timestamp
+    maint_datetime: datetime
     ata_code: Optional[str] = None
 
 
@@ -116,12 +114,15 @@ class WashConfig:
     """Configuration for the wash module
 
     Attributes:
-        smooth_window: Number of flights for smoothing.
+        smooth_window: Number of flights for per-segment smoothing.
+        pre_smooth_window: Window for initial smoothing of raw values when
+            pre-smoothed data (float_value_smooth) is not provided.
         n_obs_mean: Number of observations for before/after wash mean.
         parameters: List of parameters to analyze.
     """
 
     smooth_window: int = 30
+    pre_smooth_window: int = 15
     n_obs_mean: int = 15
     parameters: list[WashParameter] = field(default_factory=lambda: list(DEFAULT_PARAMETERS))
 
@@ -133,8 +134,8 @@ class WashEvent:
     Attributes:
         engine_id: Engine identifier
         event_index: Cumulative event index (starting from 1)
-        maint_datetime: Maintenance event timestamp
-        ata_code: ATA code of the maintenance event
+        maint_datetime: Wash event timestamp
+        ata_code: ATA code of the event
         parameter: The analyzed parameter config
         mean_before: Worst smoothed value in last N obs before wash
         mean_after: Best smoothed value in first N obs after wash
@@ -144,31 +145,45 @@ class WashEvent:
 
     engine_id: str
     event_index: int
-    maint_datetime: pd.Timestamp
+    maint_datetime: Optional[datetime]
     ata_code: Optional[str]
     parameter: WashParameter
     mean_before: float
     mean_after: float
     delta: float
-    time_loss_of_efficiency: Optional[pd.Timestamp] = None
+    time_loss_of_efficiency: Optional[datetime] = None
 
     @property
     def has_loss(self) -> bool:
         """Whether a loss-of-efficiency point was detected."""
         return self.time_loss_of_efficiency is not None
 
+    @property
+    def days_loss_of_efficiency(self) -> Optional[int]:
+        """Days between maintenance and loss-of-efficiency, or None."""
+        if self.has_loss and self.maint_datetime is not None:
+            return (self.time_loss_of_efficiency - self.maint_datetime).days
+        return None
+
 
 @dataclass
-class WashResult:
-    """Complete result of wash effect analysis.
+class WashEventSummary:
+    """Summary for a single wash event across all analyzed parameters.
+
+    Groups per-parameter WashEvent results by wash identity (engine_id and event_index).
 
     Attributes:
-        df: Full time-series DataFrame with smoothed values and annotations
-        events: List of WashEvent results per wash per parameter
-        df_event: Summary DataFrame of wash events (one row per wash,
-            columns for each parameter's delta and loss-of-efficiency metrics).
+        engine_id: Engine identifier.
+        event_index: Cumulative event index (starting from 1).
+        maint_datetime: Maintenance event timestamp.
+        ata_code: ATA code of the maintenance event.
+        results: Per-parameter WashEvent results for this wash.
     """
 
-    df: pd.DataFrame
-    events: list[WashEvent]
-    df_event: pd.DataFrame
+    engine_id: str
+    event_index: int
+    maint_datetime: Optional[datetime]
+    ata_code: Optional[str]
+    results: list[WashEvent]
+
+

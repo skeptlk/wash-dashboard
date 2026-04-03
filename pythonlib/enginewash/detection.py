@@ -21,30 +21,6 @@ def compute_wash_means(
 ) -> tuple[float, float, float]:
     """Compute before-wash and after-wash reference values.
 
-    For downward-trend parameters (direction=-1, lower is better):
-        before = min of last n_obs (worst = highest before wash)
-        after  = max of first n_obs (best = lowest, but we take max of the
-                 smoothed first-N which represents the recovery peak)
-
-    Wait — let me re-read the R code carefully. The R code does:
-        direction=-1 (lower is better):
-            mean_before = min(tail(smooth, n_obs))  → lowest in last N before
-            mean_after  = max(head(smooth, n_obs))  → highest in first N after
-
-    This means 'before' captures the degraded (low) state right before wash,
-    and 'after' captures the recovered (high) peak right after wash.
-    Actually for "lower is better" params, lower = better, so:
-        - Before wash, values are high (bad) → min gives the best of the bad
-        - After wash, values should drop (good) → max gives the worst of the good
-
-    The delta = after - before. For GWFM (lower=better), if wash helped,
-    after < before, so delta < 0 (negative = improvement).
-
-    For EGTHDM (higher=better, direction=+1):
-        mean_before = max(tail(smooth, n_obs)) → highest before (worst margin)
-        mean_after  = min(head(smooth, n_obs)) → lowest after (worst of improved)
-        delta = after - before → positive = improvement
-
     Args:
         before_segment: Smoothed values from end of previous segment.
         after_segment: Smoothed values from start of current segment.

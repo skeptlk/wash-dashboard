@@ -12,8 +12,8 @@ from .models import (
     TrendDirection,
     WashConfig,
     WashEvent,
+    WashEventSummary,
     WashParameter,
-    WashResult,
 )
 from .smoothing import running_mean, smooth_series
 from .detection import compute_wash_means, detect_loss_of_efficiency
@@ -23,7 +23,7 @@ __all__ = [
     "WashConfig",
     "WashParameter",
     "WashEvent",
-    "WashResult",
+    "WashEventSummary",
     "FlightRecord",
     "MaintenanceRecord",
     "FlightPhase",

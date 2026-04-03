@@ -1,5 +1,7 @@
 """Tests for the WashCalculator end-to-end pipeline."""
 
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -12,14 +14,14 @@ def make_flights(engine_id: str, n: int, base_values: list[float]) -> list[Fligh
     dates = pd.date_range("2024-01-01", periods=n, freq="D")
     values = np.interp(np.arange(n), np.linspace(0, n - 1, len(base_values)), base_values)
     return [
-        FlightRecord(engine_id=engine_id, flight_datetime=dt, float_value=float(v), float_value_smooth=float(v))
+        FlightRecord(engine_id=engine_id, flight_datetime=dt.to_pydatetime(), float_value=float(v), float_value_smooth=float(v))
         for dt, v in zip(dates, values)
     ]
 
 
 def make_maintenance(engine_id: str, dates: list[str], ata_codes: list[str]) -> list[MaintenanceRecord]:
     return [
-        MaintenanceRecord(engine_id=engine_id, maint_datetime=pd.Timestamp(dt), ata_code=ata)
+        MaintenanceRecord(engine_id=engine_id, maint_datetime=datetime.fromisoformat(dt), ata_code=ata)
         for dt, ata in zip(dates, ata_codes)
     ]
 
@@ -34,17 +36,17 @@ class TestWashCalculator:
         values = np.concatenate([pre, post])
         dates = pd.date_range("2024-01-01", periods=100, freq="D")
         flights = [
-            FlightRecord(engine_id="ENG001", flight_datetime=dt, float_value=float(v), float_value_smooth=float(v))
+            FlightRecord(engine_id="ENG001", flight_datetime=dt.to_pydatetime(), float_value=float(v), float_value_smooth=float(v))
             for dt, v in zip(dates, values)
         ]
         # Wash happens between day 50 and 51
         maint = make_maintenance("ENG001", ["2024-02-20"], ["206"])
 
         calc = WashCalculator(WashConfig(smooth_window=5, n_obs_mean=5))
-        result = calc.process(flights, maint, GWFM)
+        summaries = calc.process(flights, maint, GWFM)
 
-        assert len(result.events) == 1
-        ev = result.events[0]
+        assert len(summaries) == 1
+        ev = summaries[0].results[0]
         assert ev.engine_id == "ENG001"
         assert ev.ata_code == "206"
         # Delta should be negative (improvement for lower-is-better)
@@ -59,28 +61,27 @@ class TestWashCalculator:
         values = np.concatenate([pre, post])
         dates = pd.date_range("2024-01-01", periods=100, freq="D")
         flights = [
-            FlightRecord(engine_id="ENG002", flight_datetime=dt, float_value=float(v), float_value_smooth=float(v))
+            FlightRecord(engine_id="ENG002", flight_datetime=dt.to_pydatetime(), float_value=float(v), float_value_smooth=float(v))
             for dt, v in zip(dates, values)
         ]
         maint = make_maintenance("ENG002", ["2024-02-20"], ["207"])
 
         calc = WashCalculator(WashConfig(smooth_window=5, n_obs_mean=5))
-        result = calc.process(flights, maint, EGTHDM)
+        summaries = calc.process(flights, maint, EGTHDM)
 
-        assert len(result.events) == 1
-        ev = result.events[0]
+        assert len(summaries) == 1
+        ev = summaries[0].results[0]
         assert ev.delta > 0
 
     def test_no_maintenance_events(self):
-        """No washes → no events, original df returned."""
+        """No washes → no events, empty summaries."""
         flights = make_flights("ENG003", 50, [10.0, 10.0])
         maint: list[MaintenanceRecord] = []
 
         calc = WashCalculator()
-        result = calc.process(flights, maint, GWFM)
+        summaries = calc.process(flights, maint, GWFM)
 
-        assert len(result.events) == 0
-        assert result.df_event.empty
+        assert summaries == []
 
     def test_multiple_engines(self):
         """Each engine processed independently."""
@@ -92,9 +93,9 @@ class TestWashCalculator:
         )
 
         calc = WashCalculator(WashConfig(smooth_window=5, n_obs_mean=5))
-        result = calc.process(flights, maint, GWFM)
+        summaries = calc.process(flights, maint, GWFM)
 
-        engine_ids = {ev.engine_id for ev in result.events}
+        engine_ids = {s.engine_id for s in summaries}
         assert engine_ids == {"ENG_A", "ENG_B"}
 
     def test_multiple_washes_same_engine(self):
@@ -110,51 +111,42 @@ class TestWashCalculator:
         )
 
         calc = WashCalculator(WashConfig(smooth_window=5, n_obs_mean=5))
-        result = calc.process(flights, maint, GWFM)
+        summaries = calc.process(flights, maint, GWFM)
 
-        assert len(result.events) == 2
-        assert result.events[0].event_index == 1
-        assert result.events[1].event_index == 2
+        assert len(summaries) == 2
+        assert summaries[0].event_index == 1
+        assert summaries[1].event_index == 2
 
-    def test_event_table_columns(self):
-        """df_event has correctly named columns for the parameter."""
+    def test_summary_structure(self):
+        """Summaries contain expected fields and nested WashEvent results."""
         flights = make_flights("ENG005", 80, [5.0, 7.0, 4.0, 6.0])
         maint = make_maintenance("ENG005", ["2024-02-15"], ["206"])
 
         calc = WashCalculator(WashConfig(smooth_window=5, n_obs_mean=5))
-        result = calc.process(flights, maint, GWFM)
+        summaries = calc.process(flights, maint, GWFM)
 
-        assert not result.df_event.empty
-        expected_cols = {
-            "engine_id", "event_index", "maint_datetime", "ata_code",
-            "delta_GWFM_CRUISE", "mean_GWFM_CRUISE_before_wash",
-            "mean_GWFM_CRUISE_after_wash", "date_loe_GWFM_CRUISE",
-            "days_loe_GWFM_CRUISE",
-        }
-        assert expected_cols.issubset(set(result.df_event.columns))
+        assert len(summaries) == 1
+        s = summaries[0]
+        assert s.engine_id == "ENG005"
+        assert s.event_index == 1
+        assert s.ata_code == "206"
+        assert s.maint_datetime is not None
+        assert len(s.results) == 1
+        assert s.results[0].parameter == GWFM
 
-    def test_process_all_merges(self):
-        """process_all joins event tables from multiple parameters."""
+    def test_process_all_groups_parameters(self):
+        """process_all groups events from multiple parameters into summaries."""
         flights = make_flights("ENG006", 80, [5.0, 7.0, 4.0, 6.0])
         maint = make_maintenance("ENG006", ["2024-02-15"], ["206"])
 
         calc = WashCalculator(WashConfig(smooth_window=5, n_obs_mean=5))
-        result = calc.process_all(flights, maint, parameters=[GWFM, EGTHDM])
+        summaries = calc.process_all(flights, maint, parameters=[GWFM, EGTHDM])
 
-        assert not result.df_event.empty
-        cols = set(result.df_event.columns)
-        assert "delta_GWFM_CRUISE" in cols
-        assert "delta_EGTHDM_TAKEOFF" in cols
-
-    def test_smoothed_column_present(self):
-        """Output df contains the custom smoothed column."""
-        flights = make_flights("ENG007", 50, [1.0, 5.0])
-        maint: list[MaintenanceRecord] = []
-
-        calc = WashCalculator()
-        result = calc.process(flights, maint, GWFM)
-
-        assert "float_value_smooth_custom" in result.df.columns
+        assert len(summaries) == 1
+        s = summaries[0]
+        param_names = {r.parameter.name for r in s.results}
+        assert "GWFM" in param_names
+        assert "EGTHDM" in param_names
 
     def test_loss_of_efficiency_detected(self):
         """When post-wash values return to pre-wash level, LoE is detected."""
@@ -174,9 +166,9 @@ class TestWashCalculator:
         # Use a low threshold to catch the re-degradation
         from enginewash.models import WashParameter, FlightPhase, TrendDirection
         param = WashParameter("GWFM", FlightPhase.CRUISE, TrendDirection.DOWN, threshold=1.0)
-        result = calc.process(flights, maint, param)
+        summaries = calc.process(flights, maint, param)
 
-        assert len(result.events) == 1
-        ev = result.events[0]
+        assert len(summaries) == 1
+        ev = summaries[0].results[0]
         # With values returning to 10.0 and threshold=1, loss should be detected
         assert ev.has_loss

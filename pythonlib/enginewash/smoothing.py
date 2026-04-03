@@ -21,21 +21,9 @@ def running_mean(values: pd.Series | np.ndarray, window: int = 30) -> np.ndarray
         numpy array of smoothed values, same length as input.
     """
     arr = np.asarray(values, dtype=np.float64)
-    n = len(arr)
-    if n == 0:
+    if len(arr) == 0:
         return arr.copy()
-
-    result = np.empty(n, dtype=np.float64)
-    half = window // 2
-
-    for i in range(n):
-        lo = max(0, i - half)
-        hi = min(n, i + half + 1)
-        segment = arr[lo:hi]
-        valid = segment[~np.isnan(segment)]
-        result[i] = np.mean(valid) if len(valid) > 0 else np.nan
-
-    return result
+    return np.array(pd.Series(arr).rolling(window=window, center=True, min_periods=1).mean())
 
 
 def smooth_series(

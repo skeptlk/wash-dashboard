@@ -13,8 +13,9 @@ import numpy as np
 import pandas as pd
 
 from .detection import compute_wash_means, detect_loss_of_efficiency
-from .models import FlightRecord, MaintenanceRecord, WashConfig, WashEvent, WashParameter, WashResult
+from .models import FlightRecord, MaintenanceRecord, WashConfig, WashEvent, WashEventSummary, WashParameter
 from .smoothing import smooth_series
+from collections import OrderedDict
 
 
 class WashCalculator:
@@ -27,17 +28,15 @@ class WashCalculator:
       4. Compute before/after wash deltas
       5. Detect loss-of-efficiency points
 
-    Usage::
+    Usage:
 
         calc = WashCalculator(config=WashConfig())
-        result = calc.process(
+        summaries = calc.process(
             flights=[FlightRecord(...)],
             maintenance=[MaintenanceRecord(...)],
             parameter=EGTHDM,
         )
-        # result.df        — annotated time series
-        # result.events    — list of WashEvent
-        # result.df_event  — summary DataFrame
+        # summaries — list of WashEventSummary, each containing per-parameter WashEvents
     """
 
     def __init__(self, config: WashConfig | None = None):
@@ -48,16 +47,19 @@ class WashCalculator:
         flights: list[FlightRecord],
         maintenance: list[MaintenanceRecord],
         parameter: WashParameter,
-    ) -> WashResult:
+        utilization_df: pd.DataFrame | None = None,
+    ) -> list[WashEventSummary]:
         """Run the full wash-effect analysis for one parameter.
 
         Args:
             flights: Flight records, one per flight.
             maintenance: Wash/maintenance events.
             parameter: Parameter configuration.
+            utilization_df: Optional utilization data (engine_id, flight_datetime,
+                tac, tah) for future cycle/hour enrichment. Currently unused.
 
         Returns:
-            WashResult with annotated DataFrame, events list, and summary.
+            List of WashEventSummary, one per wash event.
         """
         flights_df = pd.DataFrame([dataclasses.asdict(f) for f in flights])
         maintenance_df = (
@@ -68,60 +70,45 @@ class WashCalculator:
         df = self._prepare_data(flights_df, maintenance_df)
         df = self._segment_events(df)
         df = self._apply_smoothing(df, parameter)
-        df, events = self._compute_deltas(df, parameter)
-        df_event = self._build_event_table(events, parameter)
-
-        return WashResult(df=df, events=events, df_event=df_event)
+        _df, events = self._compute_deltas(df, parameter)
+        return self._build_summaries(events)
 
     def process_all(
         self,
         flights: list[FlightRecord],
         maintenance: list[MaintenanceRecord],
         parameters: list[WashParameter] | None = None,
-    ) -> WashResult:
+        utilization_df: pd.DataFrame | None = None,
+    ) -> list[WashEventSummary]:
         """Run wash-effect analysis for all configured parameters and merge.
 
-        Processes each parameter independently, then joins event tables
-        into a single summary (one row per wash, columns for each parameter).
+        Processes each parameter independently, then groups events into
+        summaries keyed by (engine_id, event_index).
 
         Args:
             flights: Flight records (see process() for schema).
             maintenance: Wash/maintenance events (see process() for schema).
             parameters: Parameters to analyze. Defaults to config.parameters.
+            utilization_df: Optional utilization data for future cycle/hour
+                enrichment. Currently unused.
 
         Returns:
-            WashResult with merged df_event across all parameters.
+            List of WashEventSummary items with WashEvent results for each parameter.
         """
         params = parameters or self.config.parameters
         all_events: list[WashEvent] = []
-        event_dfs: list[pd.DataFrame] = []
-        last_df = pd.DataFrame()
 
         for param in params:
-            result = self.process(
+            summaries = self.process(
                 flights=flights,
                 maintenance=maintenance,
                 parameter=param,
+                utilization_df=utilization_df,
             )
-            all_events.extend(result.events)
-            if not result.df_event.empty:
-                event_dfs.append(result.df_event)
-            last_df = result.df
+            for s in summaries:
+                all_events.extend(s.results)
 
-        if not event_dfs:
-            return WashResult(
-                df=last_df,
-                events=all_events,
-                df_event=pd.DataFrame(),
-            )
-
-        # Merge event tables on common keys
-        merge_keys = ["engine_id", "event_index", "maint_datetime", "ata_code"]
-        merged = event_dfs[0]
-        for edf in event_dfs[1:]:
-            merged = merged.merge(edf, on=merge_keys, how="outer")
-
-        return WashResult(df=last_df, events=all_events, df_event=merged)
+        return self._build_summaries(all_events)
 
     def _prepare_data(
         self, flights_df: pd.DataFrame, maintenance_df: pd.DataFrame
@@ -135,11 +122,16 @@ class WashCalculator:
         df = df.sort_values(["engine_id", "flight_datetime"]).reset_index(drop=True)
 
         if "float_value_smooth" not in df.columns:
-            df["float_value_smooth"] = df["float_value"]
+            df["float_value_smooth"] = np.nan
 
-        # Fill missing smooth with raw; infer_objects suppresses pandas FutureWarning
-        # about silent dtype downcasting during fillna
-        df["float_value_smooth"] = df["float_value_smooth"].fillna(df["float_value"]).infer_objects(copy=False)
+        # Where pre-smoothed values are missing, fill with a running mean of raw values
+        missing = df["float_value_smooth"].isna()
+        if missing.any():
+            smoothed_raw = smooth_series(
+                df.loc[missing, "float_value"],
+                window=self.config.pre_smooth_window,
+            )
+            df.loc[missing, "float_value_smooth"] = smoothed_raw
 
         # Mark wash events
         df["event"] = 0
@@ -254,10 +246,15 @@ class WashCalculator:
                 else:
                     df.loc[curr_mask, "efficient_treatment"] = 1
 
-                # Build event record
+                # Build event record — convert pandas types to stdlib
                 wash_row = df.loc[curr_mask & (df["event"] == 1)]
-                maint_dt = wash_row["maint_datetime"].iloc[0] if len(wash_row) > 0 else pd.NaT
+                maint_dt = wash_row["maint_datetime"].iloc[0] if len(wash_row) > 0 else None
+                maint_dt = maint_dt.to_pydatetime() if pd.notna(maint_dt) else None
                 ata = wash_row["ata_code"].iloc[0] if len(wash_row) > 0 else None
+
+                time_loe_dt = None
+                if time_loe is not None:
+                    time_loe_dt = pd.Timestamp(time_loe).to_pydatetime()
 
                 events.append(
                     WashEvent(
@@ -269,41 +266,31 @@ class WashCalculator:
                         mean_before=mean_before,
                         mean_after=mean_after,
                         delta=delta,
-                        time_loss_of_efficiency=time_loe,
+                        time_loss_of_efficiency=time_loe_dt,
                     )
                 )
 
         return df, events
 
-    def _build_event_table(
-        self,
-        events: list[WashEvent],
-        parameter: WashParameter,
-    ) -> pd.DataFrame:
-        """Build summary DataFrame from wash events."""
-        if not events:
-            return pd.DataFrame()
+    @staticmethod
+    def _build_summaries(events: list[WashEvent]) -> list[WashEventSummary]:
+        """Group WashEvents into per-wash summaries."""
 
-        suffix = parameter.suffix
-
-        records = []
+        groups: OrderedDict[tuple[str, int], list[WashEvent]] = OrderedDict()
         for ev in events:
-            days_loe = (
-                (ev.time_loss_of_efficiency - ev.maint_datetime).days
-                if ev.has_loss and pd.notna(ev.maint_datetime)
-                else None
-            )
-            rec = {
-                "engine_id": ev.engine_id,
-                "event_index": ev.event_index,
-                "maint_datetime": ev.maint_datetime,
-                "ata_code": ev.ata_code,
-                f"delta_{suffix}": ev.delta,
-                f"mean_{suffix}_before_wash": ev.mean_before,
-                f"mean_{suffix}_after_wash": ev.mean_after,
-                f"date_loe_{suffix}": ev.time_loss_of_efficiency,
-                f"days_loe_{suffix}": days_loe,
-            }
-            records.append(rec)
+            key = (ev.engine_id, ev.event_index)
+            groups.setdefault(key, []).append(ev)
 
-        return pd.DataFrame(records)
+        summaries = []
+        for (engine_id, event_index), group in groups.items():
+            first = group[0]
+            summaries.append(
+                WashEventSummary(
+                    engine_id=engine_id,
+                    event_index=event_index,
+                    maint_datetime=first.maint_datetime,
+                    ata_code=first.ata_code,
+                    results=group,
+                )
+            )
+        return summaries
