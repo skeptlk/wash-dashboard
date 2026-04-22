@@ -13,11 +13,12 @@ import pandas as pd
 import numpy as np
 
 from enginewash import FlightRecord, MaintenanceRecord, WashCalculator, WashConfig
-from enginewash.models import FlightPhase, TrendDirection, WashParameter
+from enginewash.models import (
+    DEGT, EGTHDM, GWFM, FlightPhase, TrendDirection, WashParameter,
+)
 from enginewash.smoothing import smooth_series
 
-THEME_LIGHT = dbc.themes.FLATLY
-THEME_DARK = dbc.themes.DARKLY
+FA_CDN = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"
 
 # ---------------------------------------------------------------------------
 # Data loading (once at startup)
@@ -30,6 +31,9 @@ maintenance_df = pd.read_parquet(
 )
 takeoff_df = pd.read_parquet(
     "https://storage.yandexcloud.net/ecm-data/s7.b737_takeoff_20260222-merged.parquet"
+)
+cruise_df = pd.read_parquet(
+    "https://storage.yandexcloud.net/ecm-data/s7.b737_cruise_20260222-merged.parquet"
 )
 
 print("Data loaded.")
@@ -48,14 +52,46 @@ takeoff = (
 )
 takeoff["engine_id"] = takeoff["engine_id"].astype(int).astype(str)
 
-DATE_MIN = takeoff["flight_datetime"].min().date()
-DATE_MAX = takeoff["flight_datetime"].max().date()
-DEFAULT_START = (takeoff["flight_datetime"].max() - pd.DateOffset(years=2)).date()
+# Cruise data — GWFM and DEGT
+cruise_gwfm = (
+    cruise_df[["engine_id", "flight_datetime", "gwfm"]]
+    .dropna()
+    .copy()
+)
+cruise_gwfm["engine_id"] = cruise_gwfm["engine_id"].astype(int).astype(str)
 
-# Engines that appear in both datasets
+cruise_degt = (
+    cruise_df[["engine_id", "flight_datetime", "degt"]]
+    .dropna()
+    .copy()
+)
+cruise_degt["engine_id"] = cruise_degt["engine_id"].astype(int).astype(str)
+
+# Parameter configuration mapping
+PARAM_OPTIONS = {
+    "EGTHDM (Takeoff)": {"col": "egthdm", "df": takeoff, "param": EGTHDM},
+    "GWFM (Cruise)": {"col": "gwfm", "df": cruise_gwfm, "param": GWFM},
+    "DEGT (Cruise)": {"col": "degt", "df": cruise_degt, "param": DEGT},
+}
+
+# Date range across all datasets
+all_dates = pd.concat([
+    takeoff["flight_datetime"],
+    cruise_gwfm["flight_datetime"],
+    cruise_degt["flight_datetime"],
+])
+DATE_MIN = all_dates.min().date()
+DATE_MAX = all_dates.max().date()
+DEFAULT_START = (all_dates.max() - pd.DateOffset(years=2)).date()
+
+# Engines that appear in both wash and flight datasets
 engine_ids_wash = set(wash_maint["engine_id_str"].unique())
-engine_ids_takeoff = set(takeoff["engine_id"].unique())
-available_engines = sorted(engine_ids_wash & engine_ids_takeoff)
+engine_ids_flight = (
+    set(takeoff["engine_id"].unique())
+    | set(cruise_gwfm["engine_id"].unique())
+    | set(cruise_degt["engine_id"].unique())
+)
+available_engines = sorted(engine_ids_wash & engine_ids_flight)
 
 # ---------------------------------------------------------------------------
 # Layout
@@ -67,11 +103,24 @@ controls = dbc.Card(
             dbc.Col(html.H6("Engine Wash Analysis", className="fw-bold mb-0"),
                     width="auto"),
             dbc.Col(
-                dbc.Switch(id="theme-toggle", label="Dark", value=False,
-                           className="mb-0", style={"fontSize": "0.75rem"}),
-                width="auto", className="ms-auto",
+                html.Span([
+                    dbc.Label(className="fa fa-moon me-1", html_for="theme-toggle"),
+                    dbc.Switch(id="theme-toggle", value=True,
+                               className="d-inline-block ms-1 mb-0", persistence=True),
+                    dbc.Label(className="fa fa-sun ms-1", html_for="theme-toggle"),
+                ]),
+                width="auto", className="ms-auto d-flex align-items-center",
             ),
         ], align="center", className="mb-2"),
+
+        dbc.Label("Parameter", class_name="small fw-semibold mb-0"),
+        dcc.Dropdown(
+            id="param-selector",
+            options=[{"label": k, "value": k} for k in PARAM_OPTIONS],
+            value="EGTHDM (Takeoff)",
+            clearable=False,
+            className="mb-2",
+        ),
 
         dbc.Label("Engine", class_name="small fw-semibold mb-0"),
         dcc.Dropdown(
@@ -119,10 +168,10 @@ controls = dbc.Card(
                           step=1, size="sm"),
             ], width=6),
             dbc.Col([
-                dbc.Label("LoE threshold °C", class_name="x-small text-muted mb-0",
+                dbc.Label("LoE threshold", class_name="x-small text-muted mb-0",
                           style={"fontSize": "0.72rem"}),
-                dbc.Input(id="loe-threshold", type="number", value=2.0, min=0.5, max=20.0,
-                          step=0.5, size="sm"),
+                dbc.Input(id="loe-threshold", type="number", value=2.0, min=0.01, max=20.0,
+                          step=0.01, size="sm"),
             ], width=6),
         ], className="mb-2 g-2"),
 
@@ -133,13 +182,14 @@ controls = dbc.Card(
 
 app = dash.Dash(
     __name__,
-    external_stylesheets=[THEME_LIGHT],
+    external_stylesheets=[dbc.themes.BOOTSTRAP, FA_CDN],
     title="Engine Wash Dashboard",
 )
 
 app.layout = dbc.Container(
     [
         dcc.Store(id="theme-store", data=False),
+        dcc.Store(id="figure-store"),
         dbc.Row(
             [
                 dbc.Col(
@@ -179,21 +229,29 @@ app.layout = dbc.Container(
 
 app.clientside_callback(
     """
-    function(dark) {
-        var lightUrl = "%s";
-        var darkUrl = "%s";
-        var sheets = document.querySelectorAll('link[rel="stylesheet"]');
-        for (var i = 0; i < sheets.length; i++) {
-            if (sheets[i].href.includes('flatly') || sheets[i].href.includes('darkly')) {
-                sheets[i].href = dark ? darkUrl : lightUrl;
-            }
-        }
-        return dark;
+    function(switchOn) {
+        document.documentElement.setAttribute(
+            "data-bs-theme", switchOn ? "light" : "dark"
+        );
+        return !switchOn;
     }
-    """ % (THEME_LIGHT, THEME_DARK),
+    """,
     Output("theme-store", "data"),
     Input("theme-toggle", "value"),
 )
+
+# ---------------------------------------------------------------------------
+# Update LoE threshold default when parameter changes
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("loe-threshold", "value"),
+    Input("param-selector", "value"),
+)
+def update_loe_threshold(param_key):
+    if param_key and param_key in PARAM_OPTIONS:
+        return PARAM_OPTIONS[param_key]["param"].threshold
+    return 2.0
 
 # ---------------------------------------------------------------------------
 # Callback
@@ -207,9 +265,10 @@ def _strip_tz(dt):
 
 
 @app.callback(
-    Output("chart-container", "children"),
+    Output("figure-store", "data"),
     Output("table-container", "children"),
     Input("run-button", "n_clicks"),
+    State("param-selector", "value"),
     State("engine-selector", "value"),
     State("date-range", "start_date"),
     State("date-range", "end_date"),
@@ -217,17 +276,22 @@ def _strip_tz(dt):
     State("pre-smooth-window", "value"),
     State("n-obs-mean", "value"),
     State("loe-threshold", "value"),
-    State("theme-store", "data"),
     prevent_initial_call=True,
 )
-def make_report(n_clicks, engine_id, start_date, end_date, smooth_window,
-                pre_smooth_window, n_obs_mean, loe_threshold, is_dark):
+def compute_report(n_clicks, param_key, engine_id, start_date, end_date,
+                   smooth_window, pre_smooth_window, n_obs_mean, loe_threshold):
 
     if not engine_id:
-        return dbc.Alert("Please select an engine.", color="warning"), None
+        return {"type": "error", "color": "warning", "message": "Please select an engine."}, None
 
-    # --- Filter takeoff data ---
-    pts = takeoff[takeoff["engine_id"] == engine_id].copy()
+    # --- Resolve parameter config ---
+    pcfg = PARAM_OPTIONS.get(param_key or "EGTHDM (Takeoff)")
+    param = pcfg["param"]
+    col = pcfg["col"]
+    source_df = pcfg["df"]
+
+    # --- Filter flight data ---
+    pts = source_df[source_df["engine_id"] == engine_id].copy()
     if start_date:
         pts = pts[pts["flight_datetime"] >= pd.Timestamp(start_date)]
     if end_date:
@@ -235,19 +299,19 @@ def make_report(n_clicks, engine_id, start_date, end_date, smooth_window,
     pts = pts.sort_values("flight_datetime").reset_index(drop=True)
 
     if pts.empty:
-        return dbc.Alert(
-            f"No takeoff data for engine {engine_id} in the selected date range.",
-            color="warning",
-        ), None
+        return {
+            "type": "error", "color": "warning",
+            "message": f"No {param.name} data for engine {engine_id} in the selected date range.",
+        }, None
 
     # --- Build records ---
     flights = [
         FlightRecord(
             engine_id=row.engine_id,
             flight_datetime=row.flight_datetime,
-            parameter_name="EGTHDM",
-            flight_phase=FlightPhase.TAKEOFF,
-            float_value=row.egthdm,
+            parameter_name=param.name,
+            flight_phase=param.flight_phase,
+            float_value=getattr(row, col),
         )
         for row in pts.itertuples()
     ]
@@ -264,10 +328,10 @@ def make_report(n_clicks, engine_id, start_date, end_date, smooth_window,
 
     # --- Run calculator ---
     param = WashParameter(
-        name="EGTHDM",
-        flight_phase=FlightPhase.TAKEOFF,
-        trend_direction=TrendDirection.UP,
-        threshold=float(loe_threshold or 2.0),
+        name=param.name,
+        flight_phase=param.flight_phase,
+        trend_direction=param.trend_direction,
+        threshold=float(loe_threshold or param.threshold),
     )
     config = WashConfig(
         smooth_window=int(smooth_window or 30),
@@ -281,24 +345,25 @@ def make_report(n_clicks, engine_id, start_date, end_date, smooth_window,
     events = [ev for s in summaries for ev in s.results]
 
     if not events:
-        return dbc.Alert(
-            f"No wash events found for engine {engine_id} in the selected date range.",
-            color="info",
-        ), None
+        return {
+            "type": "error", "color": "info",
+            "message": f"No wash events found for engine {engine_id} in the selected date range.",
+        }, None
 
     # --- Build Plotly figure ---
     sw = int(smooth_window or 30)
+    n_obs = int(n_obs_mean or 15)
 
     fig = go.Figure()
 
     # Raw scatter
     fig.add_trace(go.Scatter(
         x=pts["flight_datetime"],
-        y=pts["egthdm"],
+        y=pts[col],
         mode="markers",
         marker=dict(size=4, color="steelblue", opacity=0.35),
-        name="EGTHDM (raw)",
-        hovertemplate="%{x|%Y-%m-%d}<br>%{y:.1f} °C<extra></extra>",
+        name=f"{param.name} (raw)",
+        hovertemplate="%{x|%Y-%m-%d}<br>%{y:.1f}<extra></extra>",
     ))
 
     # Smooth line — one trace per segment so it breaks at each wash
@@ -319,7 +384,7 @@ def make_report(n_clicks, engine_id, start_date, end_date, smooth_window,
         ].copy()
         if seg.empty:
             continue
-        seg_smooth = smooth_series(seg["egthdm"], window=sw, fallback=seg["egthdm"])
+        seg_smooth = smooth_series(seg[col], window=sw, fallback=seg[col])
         fig.add_trace(go.Scatter(
             x=seg["flight_datetime"],
             y=seg_smooth,
@@ -340,7 +405,7 @@ def make_report(n_clicks, engine_id, start_date, end_date, smooth_window,
             y=grp["float_value_smooth_custom"],
             mode="lines",
             line=dict(color="darkorange", width=2),
-            name="2nd smooth (used for extremums)",
+            name="2nd smooth",
             legendgroup="smooth2",
             showlegend=bool(ecum == processed_df["event_cum"].min()),
             hovertemplate="%{x|%Y-%m-%d}<br>%{y:.1f} °C<extra>2nd smooth</extra>",
@@ -359,11 +424,6 @@ def make_report(n_clicks, engine_id, start_date, end_date, smooth_window,
 
         wash_t = pd.Timestamp(ev.maint_datetime)
         seg_start = pd.Timestamp(seg_starts[i])
-        after_end = (
-            pd.Timestamp(ev.time_loss_of_efficiency)
-            if ev.time_loss_of_efficiency
-            else pts["flight_datetime"].max()
-        )
 
         # Wash vertical line
         shapes.append(dict(
@@ -376,24 +436,48 @@ def make_report(n_clicks, engine_id, start_date, end_date, smooth_window,
             font=dict(size=9, color="green"), yanchor="bottom",
         ))
 
-        # Mean-before horizontal line
+        # Mean-before: last n_obs window of the previous segment
+        prev_seg = (
+            processed_df[processed_df["event_cum"] == ev.event_index - 1]
+            .sort_values("flight_datetime")
+        )
+        tail = prev_seg.iloc[-n_obs:] if len(prev_seg) >= n_obs else prev_seg
+        mean_before_start = tail["flight_datetime"].iloc[0] if not tail.empty else wash_t
+
         fig.add_trace(go.Scatter(
-            x=[seg_start, wash_t],
+            x=[mean_before_start, wash_t],
             y=[ev.mean_before, ev.mean_before],
             mode="lines",
-            line=dict(color="green", width=2, dash="dash"),
+            line=dict(color="green", width=2, dash="6,4"),
             name="Mean before",
             legendgroup="mean_before",
             showlegend=(i == 0),
             hovertemplate=f"Mean before wash #{ev.event_index}: {ev.mean_before:.1f} °C<extra></extra>",
         ))
-
-        # Mean-after horizontal line
+        # Left window-boundary tick
         fig.add_trace(go.Scatter(
-            x=[wash_t, after_end],
+            x=[mean_before_start],
+            y=[ev.mean_before],
+            mode="markers",
+            marker=dict(symbol="line-ns", size=6, color="green",
+                        line=dict(color="green", width=2)),
+            showlegend=False,
+            hoverinfo="skip",
+        ))
+
+        # Mean-after: first n_obs window of the current segment
+        curr_seg = (
+            processed_df[processed_df["event_cum"] == ev.event_index]
+            .sort_values("flight_datetime")
+        )
+        head = curr_seg.iloc[:n_obs] if len(curr_seg) >= n_obs else curr_seg
+        mean_after_end = head["flight_datetime"].iloc[-1] if not head.empty else wash_t
+
+        fig.add_trace(go.Scatter(
+            x=[wash_t, mean_after_end],
             y=[ev.mean_after, ev.mean_after],
             mode="lines",
-            line=dict(color="limegreen", width=2, dash="dash"),
+            line=dict(color="limegreen", width=2, dash="6,4"),
             name="Mean after",
             legendgroup="mean_after",
             showlegend=(i == 0),
@@ -416,20 +500,23 @@ def make_report(n_clicks, engine_id, start_date, end_date, smooth_window,
             ))
 
     fig.update_layout(
-        title=dict(text=f"Engine {engine_id} — EGTHDM (Takeoff)", font=dict(size=15)),
+        title=dict(
+            text=f"Engine {engine_id} — {param.name} ({param.flight_phase.value.title()})",
+            font=dict(size=15),
+            x=0, xanchor="left",
+        ),
         xaxis=dict(
             title="Date",
             rangeslider=dict(visible=True, thickness=0.08),
             type="date",
         ),
-        yaxis_title="EGTHDM (°C)",
+        yaxis_title=param.name,
         shapes=shapes,
         annotations=annotations,
-        legend=dict(orientation="v", x=1.02, y=1, xanchor="left", yanchor="top"),
-        height=680,
-        template="plotly_dark" if is_dark else "plotly_white",
+        legend=dict(orientation="v", x=1.0, y=1.0, xanchor="right", yanchor="bottom"),
+        autosize=True,
         hovermode="x unified",
-        margin=dict(t=50, r=20, b=20, l=60),
+        margin=dict(t=100, r=20, b=20, l=60),
     )
 
     # --- Summary table ---
@@ -462,15 +549,34 @@ def make_report(n_clicks, engine_id, start_date, end_date, smooth_window,
         striped=True, bordered=True, hover=True, size="sm", className="mt-0",
     )
 
-    chart = dcc.Graph(figure=fig, config={"displayModeBar": True},
-                      style={"height": "680px"})
-
     subtitle = html.P(
-        f"{len(events)} wash event(s) — EGTHDM / Takeoff",
+        f"{len(events)} wash event(s) — {param.name} / {param.flight_phase.value.title()}",
         className="text-muted small mb-1",
     )
 
-    return chart, [subtitle, table]
+    return {"type": "figure", "figure": fig.to_dict()}, [subtitle, table]
+
+
+@app.callback(
+    Output("chart-container", "children"),
+    Input("figure-store", "data"),
+    Input("theme-store", "data"),
+)
+def render_chart(data, is_dark):
+    if not data:
+        return html.P(
+            "Select an engine and press Make Report.",
+            className="text-muted mt-5 text-center",
+        )
+    if data.get("type") == "error":
+        return dbc.Alert(data["message"], color=data["color"])
+    fig = go.Figure(data["figure"])
+    fig.update_layout(template="plotly_dark" if is_dark else "plotly_white")
+    return dcc.Graph(
+        figure=fig,
+        config={"displayModeBar": True, "responsive": True},
+        style={"height": "calc(100vh - 24px)"},
+    )
 
 
 if __name__ == "__main__":
