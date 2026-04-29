@@ -12,11 +12,17 @@ import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
 
-from enginewash import FlightRecord, MaintenanceRecord, WashCalculator, WashConfig
-from enginewash.models import (
-    DEGT, EGTHDM, GWFM, FlightPhase, TrendDirection, WashParameter,
+from enginewash import (
+    FlightRecord,
+    MaintenanceRecord,
+    PlotCurve,
+    WashCalculator,
+    WashConfig,
+    WashEventMarkers,
 )
-from enginewash.smoothing import smooth_series
+from enginewash.models import (
+    DEGT, EGTHDM, GWFM, WashParameter,
+)
 
 import schedule
 from aircraft_registry import AIRCRAFT_REG
@@ -316,106 +322,101 @@ def _strip_tz(dt):
     return ts.tz_localize(None) if ts.tzinfo is not None else ts.replace(tzinfo=None)
 
 
-def _build_chart(engine_id, pts, processed_df, events, param, col, sw, n_obs):
+def _build_chart(
+    engine_id: str,
+    curves: list[PlotCurve],
+    markers: list[WashEventMarkers],
+    param: WashParameter,
+):
     fig = go.Figure()
+    by_kind = {c.kind: c for c in curves}
 
-    fig.add_trace(go.Scatter(
-        x=pts["flight_datetime"], y=pts[col],
-        mode="markers",
-        marker=dict(size=4, color="steelblue", opacity=0.35),
-        name=f"{param.name} (raw)",
-        hovertemplate="%{x|%Y-%m-%d}<br>%{y:.1f}<extra></extra>",
-    ))
-
-    wash_times_sorted = sorted(
-        pd.Timestamp(ev.maint_datetime) for ev in events if ev.maint_datetime is not None
-    )
-    seg_boundaries = (
-        [pts["flight_datetime"].min()]
-        + wash_times_sorted
-        + [pts["flight_datetime"].max() + pd.Timedelta(days=1)]
-    )
-    for seg_idx in range(len(seg_boundaries) - 1):
-        seg = pts[
-            (pts["flight_datetime"] >= seg_boundaries[seg_idx])
-            & (pts["flight_datetime"] < seg_boundaries[seg_idx + 1])
-        ].copy()
-        if seg.empty:
-            continue
-        seg_smooth = smooth_series(seg[col], window=sw, fallback=seg[col])
+    raw = by_kind.get("raw")
+    if raw and raw.points:
         fig.add_trace(go.Scatter(
-            x=seg["flight_datetime"], y=seg_smooth,
-            mode="lines", line=dict(color="steelblue", width=1.5),
-            name="Smooth", legendgroup="smooth", showlegend=(seg_idx == 0),
-            hovertemplate="%{x|%Y-%m-%d}<br>%{y:.1f} °C<extra>smooth</extra>",
+            x=[p.flight_datetime for p in raw.points],
+            y=[p.value for p in raw.points],
+            mode="markers",
+            marker=dict(size=4, color="steelblue", opacity=0.35),
+            name=f"{param.name} (raw)",
+            hovertemplate="%{x|%Y-%m-%d}<br>%{y:.1f}<extra></extra>",
         ))
 
-    for ecum, grp in processed_df.groupby("event_cum"):
-        grp = grp.sort_values("flight_datetime")
+    smooth = by_kind.get("smooth")
+    if smooth and smooth.points:
         fig.add_trace(go.Scatter(
-            x=grp["flight_datetime"], y=grp["float_value_smooth_custom"],
+            x=[p.flight_datetime for p in smooth.points],
+            y=[p.value for p in smooth.points],
+            mode="lines", line=dict(color="steelblue", width=1.5),
+            name="Smooth",
+            hovertemplate="%{x|%Y-%m-%d}<br>%{y:.1f}<extra>smooth</extra>",
+        ))
+
+    smooth2 = by_kind.get("smooth_custom")
+    if smooth2 and smooth2.points:
+        fig.add_trace(go.Scatter(
+            x=[p.flight_datetime for p in smooth2.points],
+            y=[p.value for p in smooth2.points],
             mode="lines", line=dict(color="darkorange", width=2),
-            name="2nd smooth", legendgroup="smooth2",
-            showlegend=bool(ecum == processed_df["event_cum"].min()),
-            hovertemplate="%{x|%Y-%m-%d}<br>%{y:.1f} °C<extra>2nd smooth</extra>",
+            name="2nd smooth",
+            hovertemplate="%{x|%Y-%m-%d}<br>%{y:.1f}<extra>2nd smooth</extra>",
         ))
 
     shapes, annotations = [], []
-    wash_times = [ev.maint_datetime for ev in events if ev.maint_datetime]
-    seg_starts = [pts["flight_datetime"].min()] + wash_times
-
-    for i, ev in enumerate(events):
-        if ev.maint_datetime is None:
-            continue
-        wash_t = pd.Timestamp(ev.maint_datetime)
-
+    for i, m in enumerate(markers):
+        wash_t = m.wash_event_point.flight_datetime
         shapes.append(dict(
             type="line", x0=wash_t, x1=wash_t, y0=0, y1=1, yref="paper",
             line=dict(color="green", width=1.5),
         ))
         annotations.append(dict(
             x=wash_t, y=1.01, yref="paper", xref="x",
-            text=f"#{ev.event_index}", showarrow=False,
+            text=f"#{m.event_index}", showarrow=False,
             font=dict(size=9, color="green"), yanchor="bottom",
         ))
 
-        prev_seg = processed_df[processed_df["event_cum"] == ev.event_index - 1].sort_values("flight_datetime")
-        tail = prev_seg.iloc[-n_obs:] if len(prev_seg) >= n_obs else prev_seg
-        mean_before_start = tail["flight_datetime"].iloc[0] if not tail.empty else wash_t
+        if m.before_value_point is not None:
+            bp = m.before_value_point
+            fig.add_trace(go.Scatter(
+                x=[bp.flight_datetime], y=[bp.value],
+                mode="markers",
+                marker=dict(symbol="diamond-dot", size=8, color="green",
+                            line=dict(color="white", width=1)),
+                hovertemplate=(
+                    f"Pre-wash extremum (#{m.event_index})<br>"
+                    f"mean_before = {bp.value:.2f}<br>"
+                    "%{x|%Y-%m-%d}<extra></extra>"
+                ),
+                name="Pre-wash extremum", legendgroup="before_value",
+                showlegend=(i == 0),
+            ))
 
-        fig.add_trace(go.Scatter(
-            x=[mean_before_start, wash_t], y=[ev.mean_before, ev.mean_before],
-            mode="lines", line=dict(color="green", width=2, dash="6,4"),
-            name="Mean before", legendgroup="mean_before", showlegend=(i == 0),
-            hovertemplate=f"Mean before wash #{ev.event_index}: {ev.mean_before:.1f} °C<extra></extra>",
-        ))
-        fig.add_trace(go.Scatter(
-            x=[mean_before_start], y=[ev.mean_before],
-            mode="markers",
-            marker=dict(symbol="line-ns", size=6, color="green", line=dict(color="green", width=2)),
-            showlegend=False, hoverinfo="skip",
-        ))
+        if m.after_value_point is not None:
+            ap = m.after_value_point
+            fig.add_trace(go.Scatter(
+                x=[ap.flight_datetime], y=[ap.value],
+                mode="markers",
+                marker=dict(symbol="diamond-dot", size=8, color="limegreen",
+                            line=dict(color="white", width=1)),
+                hovertemplate=(
+                    f"Post-wash extremum (#{m.event_index})<br>"
+                    f"mean_after = {ap.value:.2f}<br>"
+                    "%{x|%Y-%m-%d}<extra></extra>"
+                ),
+                name="Post-wash extremum", legendgroup="after_value",
+                showlegend=(i == 0),
+            ))
 
-        curr_seg = processed_df[processed_df["event_cum"] == ev.event_index].sort_values("flight_datetime")
-        head = curr_seg.iloc[:n_obs] if len(curr_seg) >= n_obs else curr_seg
-        mean_after_end = head["flight_datetime"].iloc[-1] if not head.empty else wash_t
-
-        fig.add_trace(go.Scatter(
-            x=[wash_t, mean_after_end], y=[ev.mean_after, ev.mean_after],
-            mode="lines", line=dict(color="limegreen", width=2, dash="6,4"),
-            name="Mean after", legendgroup="mean_after", showlegend=(i == 0),
-            hovertemplate=f"Mean after wash #{ev.event_index}: {ev.mean_after:.1f} °C<extra></extra>",
-        ))
-
-        if ev.time_loss_of_efficiency:
-            loe_t = pd.Timestamp(ev.time_loss_of_efficiency)
+        loe = m.loss_of_efficiency_point
+        if loe is not None:
             shapes.append(dict(
-                type="line", x0=loe_t, x1=loe_t, y0=0, y1=1, yref="paper",
+                type="line", x0=loe.flight_datetime, x1=loe.flight_datetime,
+                y0=0, y1=1, yref="paper",
                 line=dict(color="crimson", width=1.5, dash="dash"),
             ))
             annotations.append(dict(
-                x=loe_t, y=0.96, yref="paper", xref="x",
-                text=f"LoE #{ev.event_index}", showarrow=False,
+                x=loe.flight_datetime, y=0.96, yref="paper", xref="x",
+                text=f"LoE #{m.event_index}", showarrow=False,
                 font=dict(size=9, color="crimson"), yanchor="bottom",
             ))
 
@@ -522,9 +523,8 @@ def compute_report(n_clicks, param_key, engine_ids, start_date, end_date,
         n_obs_mean=int(n_obs_mean or 15),
     )
     calc = WashCalculator(config=config)
-    summaries, processed_df_all = calc.process_with_data(
-        flights=flights, maintenance=maintenance_records, parameter=param
-    )
+    summaries = calc.process(flights=flights, maintenance=maintenance_records, parameter=param)
+    plot = calc.build_plot(flights=flights, maintenance=maintenance_records, parameter=param)
     all_events = [ev for s in summaries for ev in s.results]
 
     if not all_events:
@@ -533,19 +533,21 @@ def compute_report(n_clicks, param_key, engine_ids, start_date, end_date,
             "message": "No wash events found for the selected engines in the date range.",
         }, None, None, None
 
-    # --- Build charts for all selected engines ---
-    sw = int(smooth_window or 30)
-    n_obs = int(n_obs_mean or 15)
+    curves_by_eng: dict[str, list[PlotCurve]] = {}
+    for c in plot.curves:
+        curves_by_eng.setdefault(c.engine_id, []).append(c)
+    markers_by_eng: dict[str, list[WashEventMarkers]] = {}
+    for m in plot.markers:
+        markers_by_eng.setdefault(m.engine_id, []).append(m)
 
     figures = {}
     for eid in engine_ids:
-        eng_pts = all_pts[all_pts["engine_id"] == eid].reset_index(drop=True)
-        if eng_pts.empty:
+        markers = sorted(markers_by_eng.get(eid, []), key=lambda m: m.event_index)
+        if not markers:
             continue
-        eng_processed = processed_df_all[processed_df_all["engine_id"] == eid]
-        eng_events = [ev for ev in all_events if str(ev.engine_id) == eid]
-        if eng_events:
-            figures[eid] = _build_chart(eid, eng_pts, eng_processed, eng_events, param, col, sw, n_obs).to_dict()
+        figures[eid] = _build_chart(
+            eid, curves_by_eng.get(eid, []), markers, param,
+        ).to_dict()
 
     if not figures:
         return {
@@ -621,7 +623,7 @@ def compute_report(n_clicks, param_key, engine_ids, start_date, end_date,
             marker=dict(size=4),
         ))
     violin_fig.update_layout(
-        title=dict(text="Δ by ATA code", font=dict(size=12), x=0, xanchor="left"),
+        title=dict(text="Δ by ATA code", font=dict(size=10), x=0, xanchor="left"),
         yaxis_title=f"Δ {param.name}",
         showlegend=False,
         margin=dict(t=36, r=8, b=36, l=48),

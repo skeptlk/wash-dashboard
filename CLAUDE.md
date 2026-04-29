@@ -2,7 +2,85 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Running the Application
+## Project Overview
+
+Aircraft engine condition monitoring system for airline operations (S7 Airlines). The project has two active parts and one legacy part:
+
+- **`pythonlib/`** — `enginewash` Python library: core wash-effect calculation logic (active)
+- **`dashboard/`** — Dash/Plotly prototype dashboard (active)
+- **R Shiny app** (`app.R`, `modules/`, `utils/`) — legacy production app, not under active development
+
+---
+
+## Python Library (`pythonlib/`)
+
+### Install
+
+```bash
+cd pythonlib
+pip install -e .
+# With dev dependencies (pytest):
+pip install -e ".[dev]"
+```
+
+### Run tests
+
+```bash
+cd pythonlib
+python -m pytest tests/ -v
+```
+
+### Structure
+
+- **`enginewash/models.py`** — `FlightRecord`, `MaintenanceRecord`, `WashEvent`, `WashParameter`, `WashConfig`; preset parameters `GWFM`, `DEGT`, `EGTHDM`
+- **`enginewash/smoothing.py`** — Centered moving average
+- **`enginewash/detection.py`** — Pre/post-wash delta calculation and loss-of-effectiveness detection
+- **`enginewash/calculator.py`** — `WashCalculator`: top-level entry point; `process()` / `process_all()`
+- **`enginewash/__init__.py`** — Public API exports
+
+### Processing pipeline
+
+1. Bind wash events to first flight after maintenance date
+2. Segment time series per engine via `event_cum = cumsum(event)`
+3. Smooth within each segment (centered moving average, default window = 30 flights)
+4. Compute pre/post-wash deltas from worst/best of last/first N observations
+5. Detect first flight where smoothed value returns to threshold zone relative to pre-wash level
+6. Build event table: one row per wash with delta, loss-of-effectiveness date, optional utilization metrics
+
+### Dependencies
+
+Runtime: `pandas`, `numpy` only. No DB access — callers supply data.
+
+---
+
+## Dash Dashboard (`dashboard/`)
+
+Prototype UI built with Dash + Plotly + Bootstrap. Loads data from parquet files at startup (no live DB connection needed).
+
+### Run
+
+```bash
+cd dashboard
+pip install -r requirements.txt
+python app.py
+```
+
+### Structure
+
+- **`app.py`** — Entry point; data loading, layout, callbacks
+- **`schedule.py`** — Scheduling/flight schedule data helpers
+- **`aircraft_registry.py`** — Static aircraft registration data
+- **`requirements.txt`** — `dash`, `dash-bootstrap-components`, `plotly`, `pandas`, `pyarrow`
+
+The dashboard imports `enginewash` directly from `../pythonlib` via a `sys.path` insert.
+
+---
+
+## Legacy R Shiny App
+
+> **Legacy:** The R Shiny app is no longer under active development. The Python library and Dash dashboard are the active codebase.
+
+### Running (if needed)
 
 ```r
 # From R console or RStudio
@@ -12,48 +90,36 @@ shiny::runApp('.')
 R -e "shiny::runApp('.')"
 ```
 
-The app reads `./config/config.ini` for PostgreSQL connection details. A running database connection is required.
+Requires `./config/config.ini` with PostgreSQL connection details.
 
-## Architecture
+### Tech stack
 
-This is an R Shiny dashboard for aircraft engine condition monitoring, built for airline operations (S7 Airlines). It uses the **Shiny Module Pattern** throughout.
-
-**Tech stack:**
-- UI: `bs4Dash` (Bootstrap 4 dashboard), `shinyWidgets`, `shinyjs`
+- UI: `bs4Dash`, `shinyWidgets`, `shinyjs`
 - Database: PostgreSQL via `pool` + `DBI` + `RPostgreSQL` + `dbplyr`
-- Visualization: `highcharter` (primary), `ggplot2`, `reactable`
-- Data: `dplyr`, `data.table`, `tidyr`
+- Visualization: `highcharter`, `ggplot2`, `reactable`
 - Auth: `shinymanager` (hardcoded credentials in `app.R`)
 
-**Key schemas:** `ecmapp` (main app data, presets, parameters), `s7_mdb` (smoothed engine data), `utair` (Utair-specific data)
+**Key schemas:** `ecmapp`, `s7_mdb`, `utair`
 
-## Project Structure
+### Structure
 
-- **`app.R`** — Entry point. Loads packages, reads config, creates DB pool, sets up auth, defines UI (sidebar tabs), and registers all modules.
-- **`modules/`** — All Shiny modules. Each `*_workspaceMod.R` is a full tab: UI + server logic.
-- **`utils/visualization/`** — Reusable `highcharter`-based chart functions, one file per workspace.
-- **`utils/calculator/`** — `CalculatorHistory` R6 class for engine wash event time-series analysis.
-- **`research/`** — Experimental/development scripts, not used by the app.
-- **`config/config.ini`** — Database credentials (three environments: S3, AMOS test, ECM core UAT).
+- **`app.R`** — Entry point; DB pool, auth, UI, module registration
+- **`modules/`** — Shiny modules (`*_workspaceMod.R`), one per tab
+- **`utils/visualization/`** — `highcharter`-based chart functions
+- **`utils/calculator/`** — `CalculatorHistory` R6 class
+- **`research/`** — Experimental scripts, not used by app
 
-## Modules Overview
+### Modules
 
-| Module file | Tab | Purpose |
+| File | Tab | Purpose |
 |---|---|---|
-| `enginetrends_workspaceMod.R` | Engine Trends | Parameter trending over time, multi-engine, smoothing, baseline comparison |
-| `enginewash_workspaceMod.R` | Engine Wash | Pre/post wash efficiency analysis using `CalculatorHistory` |
+| `enginetrends_workspaceMod.R` | Engine Trends | Parameter trending, multi-engine, smoothing, baseline |
+| `enginewash_workspaceMod.R` | Engine Wash | Pre/post wash efficiency using `CalculatorHistory` |
 | `fleetreports_workspaceMod.R` | Fleet Reports | Aggregate fleet reporting |
-| `maintenance_workspaceMod.R` | Maintenance | Maintenance event tracking and history |
+| `maintenance_workspaceMod.R` | Maintenance | Maintenance event tracking |
 | `fleetsummary_workspaceMod.R` | Fleet Summary | Fleet-wide status overview |
-| `constructor_workspaceMod.R` | Constructor | Report template/preset builder (largest module, ~55k lines) |
+| `constructor_workspaceMod.R` | Constructor | Report template/preset builder (~55k lines) |
 | `dataquality_workspaceMod.R` | Data Quality | Data validation and quality monitoring |
 | `useroptions_workspaceMod.R` | User Options | Per-user preferences stored as JSON in DB |
-| `alerts_workspaceMod.R` | Alerts | Alert management (currently disabled in UI) |
+| `alerts_workspaceMod.R` | Alerts | Alert management (disabled in UI) |
 | `headerMod.R` | — | Header navigation bar |
-
-## Key Patterns
-
-- **Module registration:** Each module is called in `app.R` server via `<name>Server(id, pool, ...)` and UI via `<name>UI(id)`.
-- **Database access:** The `pool` object is passed to every module. Queries use `dbplyr` (dplyr-to-SQL translation) or raw SQL via `DBI::dbGetQuery()`.
-- **User defaults:** Stored as JSON in the database, retrieved and parsed per session.
-- **Reactive state:** Most inter-module communication uses `reactiveValues` passed as arguments.
