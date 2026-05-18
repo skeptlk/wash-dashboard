@@ -6,15 +6,28 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from enginewash import EGTHDM, GWFM, FlightRecord, MaintenanceRecord, WashCalculator, WashConfig
+from enginewash import EGTHDM, GWFM, FlightPhase, FlightRecord, MaintenanceRecord, WashCalculator, WashConfig
 
 
-def make_flights(engine_id: str, n: int, base_values: list[float]) -> list[FlightRecord]:
+def make_flights(
+    engine_id: str,
+    n: int,
+    base_values: list[float],
+    parameter_name: str = "GWFM",
+    flight_phase: FlightPhase = FlightPhase.CRUISE,
+) -> list[FlightRecord]:
     """Generate synthetic flight data."""
     dates = pd.date_range("2024-01-01", periods=n, freq="D")
     values = np.interp(np.arange(n), np.linspace(0, n - 1, len(base_values)), base_values)
     return [
-        FlightRecord(engine_id=engine_id, flight_datetime=dt.to_pydatetime(), float_value=float(v), float_value_smooth=float(v))
+        FlightRecord(
+            engine_id=engine_id,
+            flight_datetime=dt.to_pydatetime(),
+            parameter_name=parameter_name,
+            flight_phase=flight_phase,
+            float_value=float(v),
+            float_value_smooth=float(v),
+        )
         for dt, v in zip(dates, values)
     ]
 
@@ -36,7 +49,11 @@ class TestWashCalculator:
         values = np.concatenate([pre, post])
         dates = pd.date_range("2024-01-01", periods=100, freq="D")
         flights = [
-            FlightRecord(engine_id="ENG001", flight_datetime=dt.to_pydatetime(), float_value=float(v), float_value_smooth=float(v))
+            FlightRecord(
+                engine_id="ENG001", flight_datetime=dt.to_pydatetime(),
+                parameter_name="GWFM", flight_phase=FlightPhase.CRUISE,
+                float_value=float(v), float_value_smooth=float(v),
+            )
             for dt, v in zip(dates, values)
         ]
         # Wash happens between day 50 and 51
@@ -61,7 +78,11 @@ class TestWashCalculator:
         values = np.concatenate([pre, post])
         dates = pd.date_range("2024-01-01", periods=100, freq="D")
         flights = [
-            FlightRecord(engine_id="ENG002", flight_datetime=dt.to_pydatetime(), float_value=float(v), float_value_smooth=float(v))
+            FlightRecord(
+                engine_id="ENG002", flight_datetime=dt.to_pydatetime(),
+                parameter_name="EGTHDM", flight_phase=FlightPhase.TAKEOFF,
+                float_value=float(v), float_value_smooth=float(v),
+            )
             for dt, v in zip(dates, values)
         ]
         maint = make_maintenance("ENG002", ["2024-02-20"], ["207"])
@@ -135,8 +156,16 @@ class TestWashCalculator:
         assert s.results[0].parameter == GWFM
 
     def test_process_all_groups_parameters(self):
-        """process_all groups events from multiple parameters into summaries."""
-        flights = make_flights("ENG006", 80, [5.0, 7.0, 4.0, 6.0])
+        """process_all filters flights by parameter_name/flight_phase and groups into summaries."""
+        gwfm_flights = make_flights(
+            "ENG006", 80, [5.0, 7.0, 4.0, 6.0],
+            parameter_name="GWFM", flight_phase=FlightPhase.CRUISE,
+        )
+        egthdm_flights = make_flights(
+            "ENG006", 80, [20.0, 12.0, 18.0, 14.0],
+            parameter_name="EGTHDM", flight_phase=FlightPhase.TAKEOFF,
+        )
+        flights = gwfm_flights + egthdm_flights
         maint = make_maintenance("ENG006", ["2024-02-15"], ["206"])
 
         calc = WashCalculator(WashConfig(smooth_window=5, n_obs_mean=5))

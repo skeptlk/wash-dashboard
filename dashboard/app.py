@@ -40,17 +40,29 @@ onwing_df = pd.read_csv(
 )
 onwing_df["engine_id"] = onwing_df["engine_id"].astype(str)
 onwing_df["aircraft_id"] = onwing_df["aircraft_id"].astype(str).str.zfill(5)
-# Keep only currently-installed engines (no removal date)
-_current = onwing_df[onwing_df["removal_datetime"].isna()].copy()
-ENGINE_LABELS: dict[str, str] = {
-    row.engine_id: (
-        f"{row.engine_id} — "
-        f"{row.aircraft_family or '?'} "
-        f"{AIRCRAFT_REG.get(row.aircraft_id, row.aircraft_id)} "
-        f"pos.{row.engine_position}"
+
+_current_eids = set(onwing_df.loc[onwing_df["removal_datetime"].isna(), "engine_id"])
+# Last mounting record per engine (covers both on-wing and off-wing)
+_last_install = (
+    onwing_df.sort_values("install_datetime")
+    .drop_duplicates("engine_id", keep="last")
+)
+ENGINE_LABELS: dict[str, str] = {}
+for _row in _last_install.itertuples():
+    _eid = _row.engine_id
+    _suffix = "" if _eid in _current_eids else " (off wing)"
+    ENGINE_LABELS[_eid] = (
+        f"{_eid} — "
+        f"{_row.aircraft_family or '?'} "
+        f"{AIRCRAFT_REG.get(_row.aircraft_id, _row.aircraft_id)} "
+        f"pos.{_row.engine_position}{_suffix}"
     )
-    for row in _current.itertuples()
-}
+
+_engine_family_map: dict[str, str] = (
+    _last_install.set_index("engine_id")["aircraft_family"]
+    .fillna("")
+    .to_dict()
+)
 
 maintenance_df = pd.read_parquet(
     "https://storage.yandexcloud.net/ecm-data/ecmapp.maintenance_20260222.parquet"
@@ -117,7 +129,13 @@ engine_ids_flight = (
     | set(cruise_gwfm["engine_id"].unique())
     | set(cruise_degt["engine_id"].unique())
 )
-available_engines = sorted(engine_ids_wash & engine_ids_flight)
+_AC_ORDER = {"A": 0, "B": 1, "E": 2}
+
+def _eng_sort_key(eid: str) -> tuple:
+    fam = str(_engine_family_map.get(eid) or "")
+    return (_AC_ORDER.get(fam[:1].upper() if fam else "", 3), eid)
+
+available_engines = sorted(engine_ids_wash & engine_ids_flight, key=_eng_sort_key)
 
 # ---------------------------------------------------------------------------
 # Layout
@@ -407,15 +425,36 @@ def _build_chart(
                 showlegend=(i == 0),
             ))
 
+        if m.before_segment is not None:
+            bs = m.before_segment
+            shapes.append(dict(
+                type="line",
+                x0=bs.start_datetime, x1=bs.end_datetime,
+                y0=0.4, y1=0.4,
+                xref="x", yref="y",
+                line=dict(color="green", width=2),
+            ))
+
+        if m.after_segment is not None:
+            as_ = m.after_segment
+            shapes.append(dict(
+                type="line",
+                x0=as_.start_datetime, x1=as_.end_datetime,
+                y0=0.4, y1=0.4,
+                xref="x", yref="y",
+                line=dict(color="limegreen", width=2),
+            ))
+
         loe = m.loss_of_efficiency_point
         if loe is not None:
             shapes.append(dict(
                 type="line", x0=loe.flight_datetime, x1=loe.flight_datetime,
                 y0=0, y1=1, yref="paper",
                 line=dict(color="crimson", width=1.5, dash="dash"),
+                layer="below",
             ))
             annotations.append(dict(
-                x=loe.flight_datetime, y=0.96, yref="paper", xref="x",
+                x=loe.flight_datetime, y=0.02, yref="paper", xref="x",
                 text=f"LoE #{m.event_index}", showarrow=False,
                 font=dict(size=9, color="crimson"), yanchor="bottom",
             ))
@@ -641,6 +680,26 @@ def on_row_click(_):
     if not ctx.triggered_id:
         return dash.no_update
     return ctx.triggered_id["engine"]
+
+
+_available_engines_set = set(available_engines)
+
+
+@app.callback(
+    Output("main-tabs", "active_tab"),
+    Output("engine-selector", "value"),
+    Output("run-button", "n_clicks"),
+    Input("schedule-click", "data"),
+    State("run-button", "n_clicks"),
+    prevent_initial_call=True,
+)
+def on_schedule_click(data, current_clicks):
+    if not data or not data.get("engine_id"):
+        return dash.no_update, dash.no_update, dash.no_update
+    engine_id = data["engine_id"]
+    if engine_id not in _available_engines_set:
+        return dash.no_update, dash.no_update, dash.no_update
+    return "tab-analysis", [engine_id], (current_clicks or 0) + 1
 
 
 @app.callback(

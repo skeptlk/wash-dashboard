@@ -31,14 +31,18 @@ class FlightRecord:
     """A single flight data point for one engine.
 
     Attributes:
-        engine_id: Engine identifier.
-        flight_datetime: Timestamp of the flight.
+        engine_id: Engine identifier
+        flight_datetime: Timestamp of the flight
+        parameter_name: Name of the parameter
+        flight_phase: Flight phase
         float_value: Raw parameter value.
-        float_value_smooth: Pre-smoothed value from DB (optional; falls back to float_value).
+        float_value_smooth: Pre-smoothed value from DB (optional; if not provided, smoothing is handled by the library).
     """
 
     engine_id: str
     flight_datetime: datetime
+    parameter_name: str
+    flight_phase: FlightPhase
     float_value: float
     float_value_smooth: Optional[float] = None
 
@@ -166,6 +170,82 @@ class WashEvent:
         return None
 
 
+@dataclass(frozen=True)
+class PlotPoint:
+    """A single point on a plot curve. `value` is None for points where no
+    smoothed value is available (e.g. wash anchors at the very start of a series)."""
+
+    flight_datetime: datetime
+    value: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class PlotCurve:
+    """A labeled sequence of points for a single engine.
+
+    Attributes:
+        kind: Curve kind — "raw", "smooth", or "smooth_custom".
+        engine_id: Engine identifier.
+        points: Ordered points (one per flight).
+    """
+
+    kind: str
+    engine_id: str
+    points: tuple[PlotPoint, ...]
+
+
+@dataclass(frozen=True)
+class PlotSegment:
+    """A horizontal reference segment with a constant value over a time range."""
+
+    start_datetime: datetime
+    end_datetime: datetime
+    value: float
+
+
+@dataclass(frozen=True)
+class WashEventMarkers:
+    """Marker points associated with a single wash event.
+
+    Attributes:
+        engine_id: Engine identifier.
+        event_index: Cumulative event index (1-based) within the engine.
+        wash_event_point: The wash itself, anchored to the first flight on/after maint_datetime.
+        before_segment: Horizontal reference for the pre-wash window (last n_obs_mean
+            flights of the previous segment), valued at mean_before.
+        after_segment: Horizontal reference for the post-wash window (first n_obs_mean
+            flights of the current segment), valued at mean_after.
+        before_value_point: Flight inside the pre-wash window whose smoothed value
+            equals mean_before (the extremum the algorithm picked).
+        after_value_point: Flight inside the post-wash window whose smoothed value
+            equals mean_after.
+        loss_of_efficiency_point: First flight where the smoothed value returns
+            to the pre-wash threshold zone, or None.
+    """
+
+    engine_id: str
+    event_index: int
+    wash_event_point: PlotPoint
+    before_segment: Optional[PlotSegment] = None
+    after_segment: Optional[PlotSegment] = None
+    before_value_point: Optional[PlotPoint] = None
+    after_value_point: Optional[PlotPoint] = None
+    loss_of_efficiency_point: Optional[PlotPoint] = None
+
+
+@dataclass(frozen=True)
+class WashPlot:
+    """Chart-ready data for a wash-effect plot.
+
+    Attributes:
+        curves: Flat list of curves across all engines (3 per engine: raw / smooth / smooth_custom).
+        markers: Flat list of per-wash marker bundles across all engines.
+    """
+
+    curves: tuple[PlotCurve, ...]
+    markers: tuple[WashEventMarkers, ...]
+
+
 @dataclass
 class WashEventSummary:
     """Summary for a single wash event across all analyzed parameters.
@@ -185,5 +265,3 @@ class WashEventSummary:
     maint_datetime: Optional[datetime]
     ata_code: Optional[str]
     results: list[WashEvent]
-
-

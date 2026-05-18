@@ -9,11 +9,16 @@ from .models import (
     FlightPhase,
     FlightRecord,
     MaintenanceRecord,
+    PlotCurve,
+    PlotPoint,
+    PlotSegment,
     TrendDirection,
     WashConfig,
     WashEvent,
+    WashEventMarkers,
     WashEventSummary,
     WashParameter,
+    WashPlot,
 )
 from .smoothing import running_mean, smooth_series
 from .detection import compute_wash_means, detect_loss_of_efficiency
@@ -36,4 +41,9 @@ __all__ = [
     "smooth_series",
     "compute_wash_means",
     "detect_loss_of_efficiency",
+    "PlotPoint",
+    "PlotCurve",
+    "PlotSegment",
+    "WashEventMarkers",
+    "WashPlot",
 ]

@@ -7,6 +7,7 @@ component to plug into the parent app.
 
 from __future__ import annotations
 
+import dash
 import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.graph_objects as go
@@ -113,8 +114,9 @@ def _layout(state: dict) -> dbc.Row:
     return dbc.Row(
         [
             dcc.Store(id="gantt-store"),
+            dcc.Store(id="schedule-click"),
             dbc.Col(
-                _controls_card(state), width=3, className="pt-3",
+                _controls_card(state), width=2, className="pt-3",
                 style={"overflowY": "auto", "maxHeight": "100vh"},
             ),
             dbc.Col(
@@ -122,7 +124,7 @@ def _layout(state: dict) -> dbc.Row:
                     children=html.Div(id="gantt-container"),
                     type="circle",
                 ),
-                width=9, className="pt-3",
+                width=10, className="pt-3",
                 style={"overflowY": "auto", "maxHeight": "100vh"},
             ),
         ],
@@ -130,14 +132,32 @@ def _layout(state: dict) -> dbc.Row:
     )
 
 
+_AC_FAMILY_ORDER = {"A": 0, "B": 1, "E": 2}
+
+
+def _label_family_key(label: str) -> int:
+    """Return AC family sort key from engine label (0=Airbus, 1=Boeing, 2=Embraer, 3=unknown)."""
+    try:
+        family = label.split(" — ", 1)[1].split()[0]
+        return _AC_FAMILY_ORDER.get(family[:1].upper(), 3)
+    except (IndexError, AttributeError):
+        return 3
+
+
 def _build_figure(df: pd.DataFrame, ata_color: dict[str, str]) -> tuple[go.Figure, list[str]]:
+    # Sort: family descending so Airbus (key=0) lands last → top of chart;
+    # within each family sort by reg and position ascending.
     eng_order = (
         df.drop_duplicates("engine_id_str")
         .assign(
+            _sort_family=lambda d: d["engine_label"].map(_label_family_key),
             _sort_reg=lambda d: d["aircraft_reg"].fillna("zzz"),
             _sort_pos=lambda d: d["engine_position"].fillna(99),
         )
-        .sort_values(["_sort_reg", "_sort_pos", "engine_id_str"])
+        .sort_values(
+            ["_sort_family", "_sort_reg", "_sort_pos", "engine_id_str"],
+            ascending=[False, True, True, True],
+        )
         ["engine_label"].tolist()
     )
 
@@ -147,10 +167,12 @@ def _build_figure(df: pd.DataFrame, ata_color: dict[str, str]) -> tuple[go.Figur
         if len(grp) < 2:
             continue
         grp = grp.sort_values("maint_datetime")
+        eid = grp["engine_id_str"].iloc[0]
         fig.add_trace(go.Scatter(
             x=grp["maint_datetime"], y=[eng_label] * len(grp),
             mode="lines", line=dict(color="rgba(128,128,128,0.35)", width=1),
             showlegend=False, hoverinfo="skip",
+            customdata=[eid] * len(grp),
         ))
 
     for ata in sorted(df["ata_code"].unique()):
@@ -161,12 +183,13 @@ def _build_figure(df: pd.DataFrame, ata_color: dict[str, str]) -> tuple[go.Figur
             marker=dict(size=9, color=ata_color.get(ata, "#888"),
                         line=dict(color="white", width=0.5)),
             name=f"ATA {ata}",
+            customdata=sub["engine_id_str"].tolist(),
             hovertemplate=(
                 "<b>%{y}</b><br>%{x|%Y-%m-%d}<br>ATA " + ata + "<extra></extra>"
             ),
         ))
 
-    chart_height = max(420, 18 * len(eng_order) + 140)
+    chart_height = max(300, 14 * len(eng_order) + 100)
     fig.update_layout(
         yaxis=dict(categoryorder="array", categoryarray=eng_order,
                    title="", automargin=True, tickfont=dict(size=10)),
@@ -186,6 +209,19 @@ def _build_figure(df: pd.DataFrame, ata_color: dict[str, str]) -> tuple[go.Figur
 def _register_callbacks(app, state: dict) -> None:
     wash_gantt = state["df"]
     ata_color = state["ata_color"]
+
+    @app.callback(
+        Output("schedule-click", "data"),
+        Input("gantt-chart", "clickData"),
+        prevent_initial_call=True,
+    )
+    def on_gantt_click(clickData):
+        if not clickData or not clickData.get("points"):
+            return dash.no_update
+        engine_id = clickData["points"][0].get("customdata")
+        if not engine_id:
+            return dash.no_update
+        return {"engine_id": str(engine_id)}
 
     @app.callback(
         Output("gantt-store", "data"),
@@ -227,6 +263,7 @@ def _register_callbacks(app, state: dict) -> None:
         fig.update_layout(template="plotly_dark" if is_dark else "plotly_white")
         height = data.get("height", 600)
         return dcc.Graph(
+            id="gantt-chart",
             figure=fig,
             config={"displayModeBar": True, "responsive": True},
             style={"height": f"{height}px"},

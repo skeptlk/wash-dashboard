@@ -9,26 +9,26 @@ from enginewash.detection import compute_wash_means, detect_loss_of_efficiency
 
 class TestComputeWashMeans:
     def test_downward_trend(self):
-        """For lower-is-better (direction=-1): before=min(tail), after=max(head)."""
+        """For lower-is-better (direction=-1): before=max(tail), after=min(head)."""
         before = np.array([10.0, 9.0, 8.0, 7.0, 6.0])
         after = np.array([3.0, 4.0, 5.0, 6.0, 7.0])
 
         mean_b, mean_a, delta = compute_wash_means(before, after, n_obs=3, direction=-1)
 
-        assert mean_b == 6.0   # min of [8, 7, 6]
-        assert mean_a == 5.0   # max of [3, 4, 5]
-        assert delta == -1.0   # 5 - 6 = -1 (improvement: lower)
+        assert mean_b == 8.0   # max of [8, 7, 6] (worst pre-wash)
+        assert mean_a == 3.0   # min of [3, 4, 5] (best post-wash)
+        assert delta == -5.0   # 3 - 8 = -5 (improvement: lower)
 
     def test_upward_trend(self):
-        """For higher-is-better (direction=+1): before=max(tail), after=min(head)."""
+        """For higher-is-better (direction=+1): before=min(tail), after=max(head)."""
         before = np.array([10.0, 8.0, 6.0, 4.0, 2.0])
         after = np.array([8.0, 9.0, 10.0, 11.0, 12.0])
 
         mean_b, mean_a, delta = compute_wash_means(before, after, n_obs=3, direction=1)
 
-        assert mean_b == 6.0   # max of [6, 4, 2]
-        assert mean_a == 8.0   # min of [8, 9, 10]
-        assert delta == 2.0    # 8 - 6 = +2 (improvement: higher)
+        assert mean_b == 2.0   # min of [6, 4, 2] (worst pre-wash)
+        assert mean_a == 10.0  # max of [8, 9, 10] (best post-wash)
+        assert delta == 8.0    # 10 - 2 = +8 (improvement: higher)
 
     def test_short_segments(self):
         """Handles segments shorter than n_obs gracefully."""
@@ -37,9 +37,9 @@ class TestComputeWashMeans:
 
         mean_b, mean_a, delta = compute_wash_means(before, after, n_obs=15, direction=-1)
 
-        assert mean_b == 4.0
-        assert mean_a == 3.0
-        assert delta == -1.0
+        assert mean_b == 5.0   # max of [5, 4] (worst pre-wash)
+        assert mean_a == 3.0   # min of [3] (best post-wash)
+        assert delta == -2.0
 
     def test_empty_segment(self):
         before = np.array([])

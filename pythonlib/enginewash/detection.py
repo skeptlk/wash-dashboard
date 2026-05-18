@@ -40,11 +40,11 @@ def compute_wash_means(
         return np.nan, np.nan, np.nan
 
     if direction == -1:
-        mean_before = float(np.min(tail_valid))
-        mean_after = float(np.max(head_valid))
-    else:
         mean_before = float(np.max(tail_valid))
         mean_after = float(np.min(head_valid))
+    else:
+        mean_before = float(np.min(tail_valid))
+        mean_after = float(np.max(head_valid))
 
     delta = mean_after - mean_before
     return mean_before, mean_after, delta

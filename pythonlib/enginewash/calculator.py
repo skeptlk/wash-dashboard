@@ -13,7 +13,16 @@ import numpy as np
 import pandas as pd
 
 from .detection import compute_wash_means, detect_loss_of_efficiency
-from .models import FlightRecord, MaintenanceRecord, WashConfig, WashEvent, WashEventSummary, WashParameter
+from .models import (
+    FlightRecord,
+    MaintenanceRecord,
+    WashConfig,
+    WashEvent,
+    WashEventSummary,
+    WashParameter,
+    WashPlot,
+)
+from .plot import build_wash_plot
 from .smoothing import smooth_series
 from collections import OrderedDict
 
@@ -33,7 +42,7 @@ class WashCalculator:
         calc = WashCalculator(config=WashConfig())
         summaries = calc.process(
             flights=[FlightRecord(...)],
-            maintenance=[MaintenanceRecord(...)],
+            maintenances=[MaintenanceRecord(...)],
             parameter=EGTHDM,
         )
         # summaries — list of WashEventSummary, each containing per-parameter WashEvents
@@ -42,10 +51,28 @@ class WashCalculator:
     def __init__(self, config: WashConfig | None = None):
         self.config = config or WashConfig()
 
+    def _run_pipeline(
+        self,
+        flights: list[FlightRecord],
+        maintenances: list[MaintenanceRecord],
+        parameter: WashParameter,
+    ) -> tuple[pd.DataFrame, list[WashEvent]]:
+        """Run the full processing pipeline; shared by `process` and `build_plot`."""
+        flights_df = pd.DataFrame([dataclasses.asdict(f) for f in flights])
+        maintenance_df = (
+            pd.DataFrame([dataclasses.asdict(m) for m in maintenances])
+            if maintenances
+            else pd.DataFrame(columns=["engine_id", "maint_datetime", "ata_code"])
+        )
+        df = self._prepare_data(flights_df, maintenance_df)
+        df = self._segment_events(df)
+        df = self._apply_smoothing(df)
+        return self._compute_deltas(df, parameter)
+
     def process(
         self,
         flights: list[FlightRecord],
-        maintenance: list[MaintenanceRecord],
+        maintenances: list[MaintenanceRecord],
         parameter: WashParameter,
         utilization_df: pd.DataFrame | None = None,
     ) -> list[WashEventSummary]:
@@ -53,44 +80,70 @@ class WashCalculator:
 
         Args:
             flights: Flight records, one per flight.
-            maintenance: Wash/maintenance events.
+            maintenances: Wash/maintenance events.
             parameter: Parameter configuration.
-            utilization_df: Optional utilization data (engine_id, flight_datetime,
-                tac, tah) for future cycle/hour enrichment. Currently unused.
+            utilization_df: Optional aircraft utilization data (from AMOS).
 
         Returns:
             List of WashEventSummary, one per wash event.
         """
-        flights_df = pd.DataFrame([dataclasses.asdict(f) for f in flights])
-        maintenance_df = (
-            pd.DataFrame([dataclasses.asdict(m) for m in maintenance])
-            if maintenance
-            else pd.DataFrame(columns=["engine_id", "maint_datetime", "ata_code"])
-        )
-        df = self._prepare_data(flights_df, maintenance_df)
-        df = self._segment_events(df)
-        df = self._apply_smoothing(df, parameter)
-        _df, events = self._compute_deltas(df, parameter)
+        _df, events = self._run_pipeline(flights, maintenances, parameter)
         return self._build_summaries(events)
+
+    # Deprecated, remove later
+    def process_with_data(
+        self,
+        flights: list[FlightRecord],
+        maintenances: list[MaintenanceRecord],
+        parameter: WashParameter,
+        utilization_df: pd.DataFrame | None = None,
+    ) -> tuple[list[WashEventSummary], pd.DataFrame]:
+        """Like process(), but also returns the internal processed DataFrame."""
+        processed_df, events = self._run_pipeline(flights, maintenances, parameter)
+        return self._build_summaries(events), processed_df
+
+    def build_plot(
+        self,
+        flights: list[FlightRecord],
+        maintenances: list[MaintenanceRecord],
+        parameter: WashParameter,
+    ) -> WashPlot:
+        """Run the pipeline and assemble a chart-ready WashPlot.
+
+        Three curves per engine (raw, first-pass smooth, per-segment
+        second-pass smooth) plus one WashEventMarkers bundle per detected
+        wash containing the wash event point, pre/post-wash mean reference
+        segments, and (if detected) the loss-of-efficiency point.
+
+        Args:
+            flights: Flight records, one per flight.
+            maintenances: Wash/maintenance events.
+            parameter: Parameter configuration.
+
+        Returns:
+            A WashPlot with flat lists of curves and markers across all engines.
+        """
+        df, events = self._run_pipeline(flights, maintenances, parameter)
+        return build_wash_plot(df, events, self.config.n_obs_mean)
+
 
     def process_all(
         self,
         flights: list[FlightRecord],
-        maintenance: list[MaintenanceRecord],
+        maintenances: list[MaintenanceRecord],
         parameters: list[WashParameter] | None = None,
         utilization_df: pd.DataFrame | None = None,
     ) -> list[WashEventSummary]:
         """Run wash-effect analysis for all configured parameters and merge.
 
         Processes each parameter independently, then groups events into
-        summaries keyed by (engine_id, event_index).
+        summaries by engine_id and event_index.
 
         Args:
             flights: Flight records (see process() for schema).
-            maintenance: Wash/maintenance events (see process() for schema).
+            maintenances: Wash/maintenance events (see process() for schema).
             parameters: Parameters to analyze. Defaults to config.parameters.
-            utilization_df: Optional utilization data for future cycle/hour
-                enrichment. Currently unused.
+            utilization_df: Optional aircraft utilization data (from AMOS).
 
         Returns:
             List of WashEventSummary items with WashEvent results for each parameter.
@@ -99,9 +152,13 @@ class WashCalculator:
         all_events: list[WashEvent] = []
 
         for param in params:
+            param_flights = [
+                f for f in flights
+                if f.parameter_name == param.name and f.flight_phase == param.flight_phase
+            ]
             summaries = self.process(
-                flights=flights,
-                maintenance=maintenance,
+                flights=param_flights,
+                maintenances=maintenances,
                 parameter=param,
                 utilization_df=utilization_df,
             )
@@ -168,12 +225,12 @@ class WashCalculator:
         return df
 
     def _apply_smoothing(
-        self, df: pd.DataFrame, parameter: WashParameter
+        self, df: pd.DataFrame
     ) -> pd.DataFrame:
         """Apply centered running mean within each event segment per engine."""
         df["float_value_smooth_custom"] = np.nan
 
-        for (eid, ecum), grp in df.groupby(["engine_id", "event_cum"]):
+        for _, grp in df.groupby(["engine_id", "event_cum"]):
             smoothed = smooth_series(
                 grp["float_value_smooth"],
                 window=self.config.smooth_window,

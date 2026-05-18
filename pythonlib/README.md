@@ -28,16 +28,16 @@ pywash/
 
 В библиотеке предусмотрены три преднастроенных параметра двигателя:
 
-| Константа | Параметр | Фаза полёта | Направление | Порог | Описание                             |
-| --------- | -------- | ----------- | ----------- | ----- | ------------------------------------ |
-| `GWFM`    | GWFM     | CRUISE      | DOWN (-1)   | 0.05  | Расход топлива — чем ниже, тем лучше |
-| `DEGT`    | DEGT     | CRUISE      | DOWN (-1)   | 2.0   | Отклонение EGT — чем ниже, тем лучше |
-| `EGTHDM`  | EGTHDM   | TAKEOFF     | UP (+1)     | 2.0   | Запас EGT — чем выше, тем лучше      |
+| Константа | Параметр | Фаза полёта | Направление | Порог | Описание                              |
+| --------- | -------- | ----------- | ----------- | ----- | ------------------------------------- |
+| `GWFM`    | GWFM     | CRUISE      | DOWN (-1)   | 0.05  | Delta Fuel Flow — чем ниже, тем лучше |
+| `DEGT`    | DEGT     | CRUISE      | DOWN (-1)   | 2.0   | Delta EGT — чем ниже, тем лучше       |
+| `EGTHDM`  | EGTHDM   | TAKEOFF     | UP (+1)     | 2.0   | EGT Margin — чем выше, тем лучше      |
 
 ## Архитектура
 
 - **Python** — без C/Cython-расширений и компиляции
-- **Без зависимости от БД** — принимает на вход pandas DataFrame; доступ к данным остаётся на стороне вызывающего кода
+- **Без зависимости от БД** — принимает на вход а; доступ к данным остаётся на стороне вызывающего кода
 - **Runtime зависимости** — только pandas и numpy
 
 ## Установка
@@ -63,51 +63,56 @@ python -m pytest tests/ -v
 ## Использование
 
 ```python
-import pandas as pd
-from pywash import WashCalculator, WashConfig, GWFM, DEGT, EGTHDM
+from pywash import WashCalculator, WashConfig, FlightRecord, FlightPhase, MaintenanceRecord, GWFM, DEGT, EGTHDM
 
-# Записи о полётах — одна строка на полёт на двигатель
-flights_df = pd.DataFrame({
-    "engine_id":          [...],
-    "flight_datetime":    [...],
-    "float_value":        [...],  # сырое значение параметра
-    "float_value_smooth": [...],  # предсглаженное значение (опционально, если не передано то сглаживаем с окном 15)
-})
+# Записи о полётах — одна строка на полёт на двигатель на параметр.
+# parameter_name и flight_phase должны соответствовать анализируемому параметру.
+flights = [
+    FlightRecord(
+        engine_id="12345",
+        flight_datetime=dt,
+        parameter_name="GWFM",
+        flight_phase=FlightPhase.CRUISE,
+        float_value=raw_value,
+        float_value_smooth=smooth_value,  # optional
+    ),
+    ...
+]
 
 # События технического обслуживания (промывки)
-maintenance_df = pd.DataFrame({
-    "engine_id":      [...],
-    "maint_datetime": [...],
-    "ata_code":       [...],  # например, "330"
-})
+maintenances = [
+    MaintenanceRecord(engine_id="ENG001", maint_datetime=dt, ata_code="330"),
+    ...
+]
 
 # Один параметр
 calc = WashCalculator(WashConfig(smooth_window=30, n_obs_mean=15))
-result = calc.process(flights_df, maintenance_df, parameter=GWFM)
+result = calc.process(flights, maintenances, parameter=GWFM)
 
 result     # Список объектов WashEventSummary
 
-# Все три параметра сразу — таблицы событий объединяются
-result = calc.process_all(flights_df, maintenance_df, parameters=[GWFM, DEGT, EGTHDM])
+# Все три параметра сразу — process_all фильтрует записи по parameter_name + flight_phase
+# и объединяет результаты в единый список WashEventSummary
+result = calc.process_all(flight_data, maintenances, parameters=[GWFM, DEGT, EGTHDM])
 ```
 
-### Пользовательские параметры
+### Кастомные параметры
 
 ```python
 from pywash import WashParameter, FlightPhase, TrendDirection
 
-my_param = WashParameter(
+custom_param = WashParameter(
     name="N1VIB",
     flight_phase=FlightPhase.CRUISE,
     trend_direction=TrendDirection.DOWN,
     threshold=0.5,
 )
-result = calc.process(flights_df, maintenance_df, parameter=my_param)
+result = calc.process(flights, maintenances, parameter=custom_param)
 ```
 
 ### Обогащение данными о налёте
 
-Для получения количества циклов и часов между промывкой и потерей эффективности передайте DataFrame с данными о налёте:
+Для получения количества полетных циклов и часов наработки двигателя между промывкой и потерей эффективности передайте DataFrame с данными о налёте:
 
 ```python
 utilization_df = pd.DataFrame({
@@ -117,6 +122,6 @@ utilization_df = pd.DataFrame({
     "tah":            [...],  # суммарный налёт в минутах (TAH)
 })
 
-result = calc.process(flights_df, maintenance_df, GWFM, utilization_df=utilization_df)
-# result.df_event получает колонки: cyc_loe_GWFM_CRUISE, hrs_loe_GWFM_CRUISE, days_loe_GWFM_CRUISE
+result = calc.process(flights, maintenances, GWFM, utilization_df=utilization_df)
+# result получает обогащённые WashEvent с колонками: cyc_loe_GWFM_CRUISE, hrs_loe_GWFM_CRUISE, days_loe_GWFM_CRUISE
 ```
