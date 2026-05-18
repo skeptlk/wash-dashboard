@@ -15,8 +15,6 @@ from .models import (
 
 
 # (kind, source column, split_at_segments)
-# Smoothing curves are split at wash boundaries — the rolling window stops at
-# each segment, so connecting them visually would misrepresent the data.
 _CURVE_COLUMNS: tuple[tuple[str, str, bool], ...] = (
     ("raw", "float_value", False),
     ("smooth", "float_value_smooth", True),
@@ -25,29 +23,29 @@ _CURVE_COLUMNS: tuple[tuple[str, str, bool], ...] = (
 
 
 def build_wash_plot(
-    df: pd.DataFrame, events: list[WashEvent], n_obs_mean: int
+    engine_dfs: list[tuple[str, pd.DataFrame]],
+    events: list[WashEvent],
+    n_obs_mean: int,
 ) -> WashPlot:
-    """Assemble a WashPlot from the processed pipeline DataFrame and events.
+    """Assemble a WashPlot from per-engine processed DataFrames and events.
 
-    Three curves per engine (raw / smooth / smooth_custom) plus one
-    WashEventMarkers bundle per detected wash.
+    Segmented plot curves per engine (raw, smooth, smooth_custom) plus
+    WashEventMarkers list for each wash event.
     """
     events_by_engine: dict[str, list[WashEvent]] = {}
-    for ev in events:
-        events_by_engine.setdefault(ev.engine_id, []).append(ev)
+    for event in events:
+        events_by_engine.setdefault(event.engine_id, []).append(event)
 
     curves: list[PlotCurve] = []
     markers: list[WashEventMarkers] = []
-    for engine_id, eng_df in df.groupby("engine_id"):
-        eng_df = eng_df.sort_values("flight_datetime")
-        eid = str(engine_id)
+    for engine_id, eng_df in engine_dfs:
         segments = {int(idx): grp for idx, grp in eng_df.groupby("event_cum")}
 
         for kind, col, split in _CURVE_COLUMNS:
-            curves.append(_build_curve(eng_df, col, kind, eid, split))
+            curves.append(_build_curve(eng_df, col, kind, engine_id, split))
 
-        for ev in events_by_engine.get(eid, []):
-            markers.append(_build_wash_markers(ev, segments, n_obs_mean, eid))
+        for event in events_by_engine.get(engine_id, []):
+            markers.append(_build_wash_markers(event, segments, n_obs_mean, engine_id))
 
     return WashPlot(curves=tuple(curves), markers=tuple(markers))
 
@@ -92,39 +90,17 @@ def _build_wash_markers(
     wash_event_point = PlotPoint(flight_datetime=anchor_dt, value=anchor_value)
 
     prev_seg = segments.get(ev.event_index - 1)
-    before_segment: PlotSegment | None = None
-    before_value_point: PlotPoint | None = None
-    if prev_seg is not None and len(prev_seg) and not pd.isna(ev.mean_before):
-        tail = prev_seg.iloc[-n_obs:]
-        before_segment = PlotSegment(
-            start_datetime=tail["flight_datetime"].iloc[0].to_pydatetime(),
-            end_datetime=anchor_dt,
-            value=float(ev.mean_before),
-        )
-        match = tail[tail["float_value_smooth_custom"] == ev.mean_before]
-        if not match.empty:
-            before_value_point = PlotPoint(
-                flight_datetime=match["flight_datetime"].iloc[0].to_pydatetime(),
-                value=float(ev.mean_before),
-            )
+    before_window = prev_seg.iloc[-n_obs:] if prev_seg is not None else None
+    before_segment, before_value_point = _build_marker_segment(
+        before_window, ev.mean_before, anchor_dt, is_before=True
+    )
 
-    head = curr_seg.iloc[:n_obs]
-    after_segment: PlotSegment | None = None
-    after_value_point: PlotPoint | None = None
-    if len(head) and not pd.isna(ev.mean_after):
-        after_segment = PlotSegment(
-            start_datetime=anchor_dt,
-            end_datetime=head["flight_datetime"].iloc[-1].to_pydatetime(),
-            value=float(ev.mean_after),
-        )
-        match = head[head["float_value_smooth_custom"] == ev.mean_after]
-        if not match.empty:
-            after_value_point = PlotPoint(
-                flight_datetime=match["flight_datetime"].iloc[0].to_pydatetime(),
-                value=float(ev.mean_after),
-            )
+    after_window = curr_seg.iloc[:n_obs]
+    after_segment, after_value_point = _build_marker_segment(
+        after_window, ev.mean_after, anchor_dt, is_before=False
+    )
 
-    loss_point: PlotPoint | None = None
+    loe_point: PlotPoint | None = None
     if ev.time_loss_of_efficiency is not None:
         loe_t = pd.Timestamp(ev.time_loss_of_efficiency)
         loe_row = curr_seg[curr_seg["flight_datetime"] == loe_t]
@@ -133,7 +109,7 @@ def _build_wash_markers(
             v = loe_row["float_value_smooth_custom"].iloc[0]
             if pd.notna(v):
                 loe_value = float(v)
-        loss_point = PlotPoint(
+        loe_point = PlotPoint(
             flight_datetime=loe_t.to_pydatetime(), value=loe_value
         )
 
@@ -145,5 +121,32 @@ def _build_wash_markers(
         after_segment=after_segment,
         before_value_point=before_value_point,
         after_value_point=after_value_point,
-        loss_of_efficiency_point=loss_point,
+        loss_of_efficiency_point=loe_point,
     )
+
+
+def _build_marker_segment(
+    window: pd.DataFrame | None,
+    mean_value: float,
+    anchor_dt,
+    is_before: bool,
+) -> tuple[PlotSegment | None, PlotPoint | None]:
+    """Build the reference segment + extremum-flight marker for one side of a wash."""
+    if window is None or window.empty or pd.isna(mean_value):
+        return None, None
+
+    window_start = window["flight_datetime"].iloc[0].to_pydatetime()
+    window_end = window["flight_datetime"].iloc[-1].to_pydatetime()
+    if is_before:
+        segment = PlotSegment(start_datetime=window_start, end_datetime=anchor_dt, value=float(mean_value))
+    else:
+        segment = PlotSegment(start_datetime=anchor_dt, end_datetime=window_end, value=float(mean_value))
+
+    match = window[window["float_value_smooth_custom"] == mean_value]
+    value_point = None
+    if not match.empty:
+        value_point = PlotPoint(
+            flight_datetime=match["flight_datetime"].iloc[0].to_pydatetime(),
+            value=float(mean_value),
+        )
+    return segment, value_point

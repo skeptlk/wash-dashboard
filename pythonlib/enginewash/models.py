@@ -61,6 +61,21 @@ class MaintenanceRecord:
     maint_datetime: datetime
     ata_code: Optional[str] = None
 
+@dataclass
+class UtilizationRecord:
+    """A single utilization record.
+
+    Attributes:
+        engine_id: Engine identifier.
+        total_cycles: Total number of cycles.
+        total_hours: Total number of hours.
+        arrival_datetime: Timestamp of the arrival event.
+    """
+    engine_id: str
+    total_cycles: int
+    total_hours: float
+    arrival_datetime: datetime
+
 
 @dataclass(frozen=True)
 class WashParameter:
@@ -133,18 +148,20 @@ class WashConfig:
 
 @dataclass
 class WashEvent:
-    """Result for a single wash event on a single parameter.
+    """Result for a single wash event on a single flight parameter.
 
     Attributes:
         engine_id: Engine identifier
         event_index: Cumulative event index (starting from 1)
         maint_datetime: Wash event timestamp
         ata_code: ATA code of the event
-        parameter: The analyzed parameter config
+        parameter: The analyzed flight parameter
         mean_before: Worst smoothed value in last N obs before wash
         mean_after: Best smoothed value in first N obs after wash
         delta: After minus before (sign depends on trend direction)
-        time_loss_of_efficiency: Timestamp when benefit wore off, or None
+        time_loss_of_efficiency: Timestamp when wash effect wore off, or None
+        cycles_loss_of_efficiency: Number of cycles the wash effect lasted, or None
+        hours_loss_of_efficiency: Number of hours the wash effect lasted, or None
     """
 
     engine_id: str
@@ -156,6 +173,8 @@ class WashEvent:
     mean_after: float
     delta: float
     time_loss_of_efficiency: Optional[datetime] = None
+    cycles_loss_of_efficiency: Optional[int] = None
+    hours_loss_of_efficiency: Optional[int] = None
 
     @property
     def has_loss(self) -> bool:
