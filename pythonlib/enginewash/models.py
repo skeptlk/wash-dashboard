@@ -63,17 +63,18 @@ class MaintenanceRecord:
 
 @dataclass
 class UtilizationRecord:
-    """A single utilization record.
-
+    """Engine utilization record.
     Attributes:
         engine_id: Engine identifier.
-        total_cycles: Total number of cycles.
-        total_hours: Total number of hours.
+        total_cycles: Cumulative engine cycles.
+        total_hours: Cumulative engine hours (tah from AMOS / 60, since tah is actually minutes).
+        departure_datetime: Timestamp of the departure event.
         arrival_datetime: Timestamp of the arrival event.
     """
     engine_id: str
     total_cycles: int
     total_hours: float
+    departure_datetime: datetime
     arrival_datetime: datetime
 
 

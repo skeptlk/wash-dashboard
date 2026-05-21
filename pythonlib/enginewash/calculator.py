@@ -25,6 +25,7 @@ from .models import (
 )
 from .plot import build_wash_plot
 from .smoothing import smooth_series
+from .utilization import UtilizationLookup, build_utilization_lookup, lookup_utilization
 from collections import OrderedDict
 
 
@@ -57,6 +58,7 @@ class WashCalculator:
         flights: list[FlightRecord],
         maintenances: list[MaintenanceRecord],
         parameter: WashParameter,
+        utilization_lookup: UtilizationLookup | None = None,
     ) -> tuple[list[tuple[str, pd.DataFrame]], list[WashEvent]]:
         """Run the full processing pipeline per engine; shared by `process` and `build_plot`.
 
@@ -81,7 +83,7 @@ class WashCalculator:
             df = self._prepare_data(eng_flights, eng_maint)
             df["event_cum"] = df["event"].cumsum()
             df = self._apply_smoothing(df)
-            events = self._compute_deltas(df, str(engine_id), parameter)
+            events = self._compute_deltas(df, str(engine_id), parameter, utilization_lookup)
             engine_results.append((str(engine_id), df))
             all_events.extend(events)
 
@@ -100,12 +102,14 @@ class WashCalculator:
             flights: Flight records, one per flight.
             maintenances: Wash/maintenance events.
             parameter: Parameter configuration.
-            utilization: Optional aircraft utilization data (from AMOS).
+            utilization: Optional engine utilization records. When provided,
+                cycles_loss_of_efficiency and hours_loss_of_efficiency are calculated
 
         Returns:
             List of WashEventSummary, one per wash event.
         """
-        _engine_dfs, events = self._run_pipeline(flights, maintenances, parameter)
+        lookup = build_utilization_lookup(utilization or [])
+        _engine_dfs, events = self._run_pipeline(flights, maintenances, parameter, lookup)
         return self._build_summaries(events)
 
     def build_plot(
@@ -138,7 +142,7 @@ class WashCalculator:
         flights: list[FlightRecord],
         maintenances: list[MaintenanceRecord],
         parameters: list[WashParameter] | None = None,
-        utilization: pd.DataFrame | None = None,
+        utilization: list[UtilizationRecord] | None = None,
     ) -> list[WashEventSummary]:
         """Run wash-effect analysis for all configured parameters and merge.
 
@@ -149,12 +153,13 @@ class WashCalculator:
             flights: Flight records (see process() for schema).
             maintenances: Wash/maintenance events (see process() for schema).
             parameters: Parameters to analyze. Defaults to config.parameters.
-            utilization: Optional aircraft utilization data (from AMOS).
+            utilization: Optional engine utilization records (see process()).
 
         Returns:
             List of WashEventSummary items with WashEvent results for each parameter.
         """
         params = parameters or self.config.parameters
+        lookup = build_utilization_lookup(utilization or [])
         all_events: list[WashEvent] = []
 
         for param in params:
@@ -162,14 +167,10 @@ class WashCalculator:
                 f for f in flights
                 if f.parameter_name == param.name and f.flight_phase == param.flight_phase
             ]
-            summaries = self.process(
-                flights=param_flights,
-                maintenances=maintenances,
-                parameter=param,
-                utilization=utilization,
+            _engine_dfs, events = self._run_pipeline(
+                param_flights, maintenances, param, lookup,
             )
-            for s in summaries:
-                all_events.extend(s.results)
+            all_events.extend(events)
 
         return self._build_summaries(all_events)
 
@@ -234,12 +235,17 @@ class WashCalculator:
         return df
 
     def _compute_deltas(
-        self, df: pd.DataFrame, engine_id: str, parameter: WashParameter
+        self,
+        df: pd.DataFrame,
+        engine_id: str,
+        parameter: WashParameter,
+        utilization_lookup: UtilizationLookup | None = None,
     ) -> list[WashEvent]:
         """Compute before/after deltas and detect loss-of-efficiency for one engine."""
         events: list[WashEvent] = []
         if df.empty:
             return events
+        lookup: UtilizationLookup = utilization_lookup or {}
 
         seg_indices = df.groupby("event_cum").indices
         smooth_values = df["float_value_smooth_custom"].values
@@ -279,6 +285,21 @@ class WashCalculator:
                 if pd.notna(ata_raw):
                     ata = ata_raw
 
+            time_loe_dt = (
+                pd.Timestamp(time_loe).to_pydatetime() if time_loe is not None else None
+            )
+
+            cyc_wash, hrs_wash = lookup_utilization(lookup, engine_id, maint_dt)
+            cyc_loss, hrs_loss = lookup_utilization(lookup, engine_id, time_loe_dt)
+            cycles_loe = (
+                cyc_loss - cyc_wash if cyc_wash is not None and cyc_loss is not None else None
+            )
+            hours_loe = (
+                int(round(hrs_loss - hrs_wash))
+                if hrs_wash is not None and hrs_loss is not None
+                else None
+            )
+
             events.append(
                 WashEvent(
                     engine_id=engine_id,
@@ -289,9 +310,9 @@ class WashCalculator:
                     mean_before=mean_before,
                     mean_after=mean_after,
                     delta=delta,
-                    time_loss_of_efficiency=(
-                        pd.Timestamp(time_loe).to_pydatetime() if time_loe is not None else None
-                    ),
+                    time_loss_of_efficiency=time_loe_dt,
+                    cycles_loss_of_efficiency=cycles_loe,
+                    hours_loss_of_efficiency=hours_loe,
                 )
             )
 

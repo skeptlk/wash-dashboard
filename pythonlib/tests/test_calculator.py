@@ -1,12 +1,21 @@
 """Tests for the WashCalculator end-to-end pipeline."""
 
-from datetime import datetime
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from enginewash import EGTHDM, GWFM, FlightPhase, FlightRecord, MaintenanceRecord, WashCalculator, WashConfig
+from enginewash import (
+    EGTHDM,
+    GWFM,
+    FlightPhase,
+    FlightRecord,
+    MaintenanceRecord,
+    UtilizationRecord,
+    WashCalculator,
+    WashConfig,
+)
 
 
 def make_flights(
@@ -201,3 +210,150 @@ class TestWashCalculator:
         ev = summaries[0].results[0]
         # With values returning to 10.0 and threshold=1, loss should be detected
         assert ev.has_loss
+
+
+def _loe_param(threshold: float = 1.0):
+    """Low-threshold GWFM variant used to force LoE detection in the fixtures below."""
+    from enginewash.models import FlightPhase, TrendDirection, WashParameter
+    return WashParameter("GWFM", FlightPhase.CRUISE, TrendDirection.DOWN, threshold=threshold)
+
+
+def _make_loe_fixture(engine_id: str = "ENGU01"):
+    """Build flights+maintenance that reliably produce a detected LoE several days after the wash.
+
+    100 daily flights from 2024-01-01. Pre-wash (flights 0..59) is stable at 10.0.
+    Wash is anchored to 2024-03-01 (flight 60). Post-wash (flights 60..99) starts
+    at 5.0, holds for 20 days, then ramps back up to 10.0 — so with threshold=1.0
+    on a DOWN parameter (max(pre) - threshold = 9), LoE lands near the end of the
+    post-wash segment.
+    """
+    dates = pd.date_range("2024-01-01", periods=100, freq="D")
+    pre = np.full(60, 10.0)
+    post_flat = np.full(20, 5.0)
+    post_ramp = np.linspace(5.0, 10.0, 20)
+    values = np.concatenate([pre, post_flat, post_ramp])
+
+    flights = [
+        FlightRecord(
+            engine_id=engine_id,
+            flight_datetime=dt.to_pydatetime(),
+            parameter_name="GWFM",
+            flight_phase=FlightPhase.CRUISE,
+            float_value=float(v),
+            float_value_smooth=float(v),
+        )
+        for dt, v in zip(dates, values)
+    ]
+    maint = make_maintenance(engine_id, ["2024-03-01"], ["206"])
+    return flights, maint
+
+
+def _linear_utilization(
+    engine_id: str,
+    start: datetime,
+    n_days: int,
+    cycles_per_day: int,
+    hours_per_day: float,
+    cycles_base: int = 1000,
+    hours_base: float = 2000.0,
+) -> list[UtilizationRecord]:
+    """One record per day with linearly growing cumulative cycles/hours.
+
+    Day i: total_cycles = cycles_base + cycles_per_day * i,
+           total_hours  = hours_base  + hours_per_day  * i.
+    """
+    return [
+        UtilizationRecord(
+            engine_id=engine_id,
+            total_cycles=cycles_base + cycles_per_day * i,
+            total_hours=hours_base + hours_per_day * i,
+            departure_datetime=start + pd.Timedelta(days=i, hours=-2),
+            arrival_datetime=start + pd.Timedelta(days=i),
+        )
+        for i in range(n_days)
+    ]
+
+
+class TestUtilizationIntegration:
+    def test_populates_cycles_and_hours_loss_of_efficiency(self):
+        """With utilization records covering wash and LoE dates, fields equal the slope-scaled day delta."""
+        engine_id = "ENGU01"
+        flights, maint = _make_loe_fixture(engine_id)
+        utilization = _linear_utilization(
+            engine_id,
+            start=datetime(2024, 1, 1),
+            n_days=100,
+            cycles_per_day=5,
+            hours_per_day=10.0,
+        )
+
+        calc = WashCalculator(WashConfig(smooth_window=3, n_obs_mean=3))
+        summaries = calc.process(flights, maint, _loe_param(), utilization=utilization)
+
+        assert len(summaries) == 1
+        ev = summaries[0].results[0]
+        assert ev.has_loss
+        assert ev.maint_datetime is not None
+
+        days_diff = (ev.time_loss_of_efficiency.date() - ev.maint_datetime.date()).days
+        assert ev.cycles_loss_of_efficiency == 5 * days_diff
+        assert ev.hours_loss_of_efficiency == int(round(10.0 * days_diff))
+        assert ev.cycles_loss_of_efficiency > 0
+        assert ev.hours_loss_of_efficiency > 0
+        assert ev.maint_datetime.date() >= date(2024, 3, 1)
+
+    def test_no_utilization_leaves_fields_none(self):
+        """Calling process() without utilization keeps cycles/hours_loss_of_efficiency as None."""
+        engine_id = "ENGU02"
+        flights, maint = _make_loe_fixture(engine_id)
+
+        calc = WashCalculator(WashConfig(smooth_window=3, n_obs_mean=3))
+        summaries = calc.process(flights, maint, _loe_param())
+
+        assert len(summaries) == 1
+        ev = summaries[0].results[0]
+        assert ev.has_loss  # LoE still detected
+        assert ev.cycles_loss_of_efficiency is None
+        assert ev.hours_loss_of_efficiency is None
+
+    def test_utilization_missing_dates_leaves_fields_none(self):
+        """If utilization records exist but not for the wash/LoE date, fields are None (R left_join NA)."""
+        engine_id = "ENGU03"
+        flights, maint = _make_loe_fixture(engine_id)
+        # Records only for an unrelated date range
+        utilization = _linear_utilization(
+            engine_id,
+            start=datetime(2023, 1, 1),
+            n_days=10,
+            cycles_per_day=5,
+            hours_per_day=10.0,
+        )
+
+        calc = WashCalculator(WashConfig(smooth_window=3, n_obs_mean=3))
+        summaries = calc.process(flights, maint, _loe_param(), utilization=utilization)
+
+        ev = summaries[0].results[0]
+        assert ev.cycles_loss_of_efficiency is None
+        assert ev.hours_loss_of_efficiency is None
+
+    def test_process_all_threads_utilization(self):
+        """process_all forwards utilization to each per-parameter pass."""
+        engine_id = "ENGU04"
+        flights, maint = _make_loe_fixture(engine_id)
+        utilization = _linear_utilization(
+            engine_id,
+            start=datetime(2024, 1, 1),
+            n_days=100,
+            cycles_per_day=5,
+            hours_per_day=10.0,
+        )
+
+        calc = WashCalculator(WashConfig(smooth_window=3, n_obs_mean=3))
+        summaries = calc.process_all(
+            flights, maint, parameters=[_loe_param()], utilization=utilization,
+        )
+
+        assert len(summaries) == 1
+        results = summaries[0].results
+        assert any(r.cycles_loss_of_efficiency is not None for r in results)
+        assert any(r.hours_loss_of_efficiency is not None for r in results)
