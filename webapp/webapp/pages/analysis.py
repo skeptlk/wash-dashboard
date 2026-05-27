@@ -1,0 +1,241 @@
+"""Wash Analysis page — `/analysis`."""
+
+from __future__ import annotations
+
+import reflex as rx
+
+from ..components.selectors import aircraft_type_selector, date_range_picker
+from ..components.shell import page_shell
+from ..state.analysis import AnalysisState
+
+
+def _num_input(label: str, value: rx.Var, on_change, min_val: int = 1) -> rx.Component:
+    return rx.vstack(
+        rx.text(label, size="1", color="var(--gray-11)"),
+        rx.input(
+            value=value.to_string(),
+            on_change=on_change,
+            type="number",
+            min=str(min_val),
+            step="1",
+            size="1",
+            width="100%",
+        ),
+        spacing="1",
+        align="stretch",
+        width="100%",
+    )
+
+
+def _control_panel() -> rx.Component:
+    return rx.vstack(
+        rx.heading("Controls", size="4"),
+        aircraft_type_selector(),
+        date_range_picker(),
+        # Parameter
+        rx.vstack(
+            rx.text("Parameter", size="2", weight="medium"),
+            rx.select(
+                AnalysisState.parameter_options,
+                value=AnalysisState.selected_parameter,
+                on_change=AnalysisState.set_selected_parameter,
+                width="100%",
+            ),
+            spacing="1",
+            align="stretch",
+            width="100%",
+        ),
+        # Engine multi-select
+        rx.vstack(
+            rx.hstack(
+                rx.text("Engines", size="2", weight="medium"),
+                rx.spacer(),
+                rx.button(
+                    "Clear",
+                    on_click=AnalysisState.clear_engines,
+                    size="1",
+                    variant="ghost",
+                ),
+                width="100%",
+                align="center",
+            ),
+            rx.scroll_area(
+                rx.vstack(
+                    rx.foreach(
+                        AnalysisState.available_engines_list,
+                        lambda eid: rx.checkbox(
+                            eid,
+                            checked=AnalysisState.selected_engine_ids.contains(eid),
+                            on_change=AnalysisState.set_engine_checked(eid),
+                            size="1",
+                        ),
+                    ),
+                    spacing="1",
+                    align="start",
+                ),
+                max_height="160px",
+                width="100%",
+            ),
+            spacing="1",
+            align="stretch",
+            width="100%",
+        ),
+        # Smoothing & detection
+        rx.divider(),
+        rx.text("Smoothing & Detection", size="2", weight="medium", color="var(--gray-11)"),
+        rx.grid(
+            _num_input("Smooth window", AnalysisState.smooth_window, AnalysisState.set_smooth_window, min_val=5),
+            _num_input("Pre-smooth", AnalysisState.pre_smooth_window, AnalysisState.set_pre_smooth_window, min_val=1),
+            _num_input("N obs mean", AnalysisState.n_obs_mean, AnalysisState.set_n_obs_mean, min_val=1),
+            rx.vstack(
+                rx.text("LoE threshold", size="1", color="var(--gray-11)"),
+                rx.input(
+                    value=AnalysisState.loe_threshold.to_string(),
+                    on_change=AnalysisState.set_loe_threshold,
+                    type="number",
+                    min="0.01",
+                    step="0.01",
+                    size="1",
+                    width="100%",
+                ),
+                spacing="1",
+                align="stretch",
+                width="100%",
+            ),
+            columns="2",
+            spacing="2",
+            width="100%",
+        ),
+        # Run button
+        rx.button(
+            rx.cond(
+                AnalysisState.is_computing,
+                rx.spinner(size="2"),
+                rx.icon("play", size=16),
+            ),
+            "Make Report",
+            on_click=AnalysisState.run_analysis,
+            disabled=AnalysisState.is_computing,
+            width="100%",
+            size="3",
+        ),
+        spacing="3",
+        align="stretch",
+        width="280px",
+        padding="10px",
+        border="1px solid var(--gray-5)",
+        border_radius="md",
+        background_color="var(--gray-2)",
+    )
+
+
+def _delta_color(row: rx.Var) -> rx.Var:
+    return rx.cond(row["delta_positive"], "var(--green-9)", "var(--red-9)")
+
+
+def _summary_row(row: rx.Var) -> rx.Component:
+    return rx.table.row(
+        rx.table.cell(row["engine_label"], max_width="200px", overflow="hidden", text_overflow="ellipsis", white_space="nowrap"),
+        rx.table.cell(row["event_index"]),
+        rx.table.cell(row["maint_date"]),
+        rx.table.cell(row["ata_code"]),
+        rx.table.cell(row["mean_before"]),
+        rx.table.cell(row["mean_after"]),
+        rx.table.cell(row["delta"], color=_delta_color(row)),
+        rx.table.cell(row["loe_date"]),
+        rx.table.cell(row["loe_days"]),
+        on_click=AnalysisState.select_engine_chart(row["engine_id"]),
+        cursor="pointer",
+        _hover={"background_color": "var(--gray-3)"},
+    )
+
+
+def _summary_table() -> rx.Component:
+    return rx.vstack(
+        rx.text(
+            AnalysisState.n_events.to_string() + " wash events",
+            size="2",
+            color="var(--gray-11)",
+        ),
+        rx.box(
+            rx.table.root(
+                rx.table.header(
+                    rx.table.row(
+                        rx.table.column_header_cell("Engine"),
+                        rx.table.column_header_cell("#"),
+                        rx.table.column_header_cell("Date"),
+                        rx.table.column_header_cell("ATA"),
+                        rx.table.column_header_cell("Before"),
+                        rx.table.column_header_cell("After"),
+                        rx.table.column_header_cell("Δ"),
+                        rx.table.column_header_cell("LoE date"),
+                        rx.table.column_header_cell("Days"),
+                    ),
+                ),
+                rx.table.body(
+                    rx.foreach(AnalysisState.summary_rows, _summary_row),
+                ),
+                variant="surface",
+                size="1",
+            ),
+            overflow_x="auto",
+            width="100%",
+        ),
+        spacing="2",
+        align="stretch",
+        width="100%",
+    )
+
+
+def _results_panel() -> rx.Component:
+    return rx.vstack(
+        rx.cond(
+            AnalysisState.is_computing,
+            rx.center(rx.spinner(size="3"), width="100%", padding_y="60px"),
+            rx.cond(
+                AnalysisState.error_message != "",
+                rx.callout(AnalysisState.error_message, icon="triangle-alert", color_scheme="orange", width="100%"),
+                rx.cond(
+                    AnalysisState.has_results,
+                    rx.vstack(
+                        rx.plotly(data=AnalysisState.chart_figure, width="100%", height="540px"),
+                        rx.divider(),
+                        _summary_table(),
+                        rx.divider(),
+                        rx.plotly(data=AnalysisState.violin_figure, width="100%", height="280px"),
+                        spacing="4",
+                        align="stretch",
+                        width="100%",
+                    ),
+                    rx.callout(
+                        'Select engines and click "Make Report".',
+                        icon="info",
+                        width="100%",
+                    ),
+                ),
+            ),
+        ),
+        spacing="4",
+        align="stretch",
+        width="100%",
+        flex="1",
+    )
+
+
+def analysis_page() -> rx.Component:
+    return page_shell(
+        "/analysis",
+        rx.vstack(
+            rx.heading("Wash Analysis", size="7"),
+            rx.hstack(
+                _control_panel(),
+                _results_panel(),
+                spacing="6",
+                align="start",
+                width="100%",
+            ),
+            spacing="4",
+            align="stretch",
+            width="100%",
+        ),
+    )
