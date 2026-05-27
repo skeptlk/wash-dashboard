@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Aircraft engine condition monitoring system for airline operations (S7 Airlines). The project has two active parts and one legacy part:
+Aircraft engine condition monitoring system for airline operations (S7 Airlines). The project has three active parts and one legacy part:
 
 - **`pythonlib/`** — `enginewash` Python library: core wash-effect calculation logic (active)
-- **`dashboard/`** — Dash/Plotly prototype dashboard (active)
+- **`webapp/`** — Reflex web app: the polished multi-page UI being built out (active, primary target)
+- **`dashboard/`** — Dash/Plotly prototype dashboard (active reference; will be retired once `webapp/` reaches parity)
 - **R Shiny app** (`app.R`, `modules/`, `utils/`) — legacy production app, not under active development
 
 ---
@@ -53,9 +54,54 @@ Runtime: `pandas`, `numpy` only. No DB access — callers supply data.
 
 ---
 
+## Reflex Web App (`webapp/`)
+
+Primary UI target. Multi-page Reflex app with three pages: Long-Term Degradation, Wash Analysis, Wash Schedule. All calculation goes through the `enginewash` library — the app is a thin UI layer.
+
+### Run
+
+```bash
+cd webapp
+pip install -r requirements.txt          # installs reflex, pandas, plotly, pyarrow, numpy
+# `enginewash` is imported from `../pythonlib` via sys.path insert in webapp/webapp/__init__.py
+reflex run                                # http://localhost:3000
+```
+
+### Structure
+
+```
+webapp/
+  rxconfig.py                       # app_name="webapp"
+  requirements.txt
+  webapp/
+    webapp.py                       # rx.App() — registers pages by route
+    trends.py                       # Lifetime linear-trend calc (will move to enginewash later)
+    data/
+      registry.py                   # AIRCRAFT_DATA_REGISTRY: aircraft_type → dataset URLs
+      loader.py                     # loads all aircraft data once at import → LOADED dict
+      derived.py                    # flights_for(), maint_for(), PARAMETER_BY_NAME
+      aircraft_registry.py          # AIRCRAFT_REG (tail-number lookup)
+    state/
+      base.py                       # GlobalState (aircraft_type, date range)
+      degradation.py                # DegradationState
+    components/
+      shell.py                      # page_shell() — sidebar nav + content area
+      selectors.py                  # aircraft_type_selector, date_range_picker
+    pages/
+      degradation.py                # @ /
+      analysis.py                   # @ /analysis  (Phase 2 stub)
+      schedule.py                   # @ /schedule  (Phase 3 stub)
+```
+
+### Adding a new aircraft type
+
+Add an entry to `AIRCRAFT_DATA_REGISTRY` in `webapp/webapp/data/registry.py` with URLs for `onwing`, `maintenance`, `takeoff`, `cruise`. Restart the app — the loader picks it up automatically and the type appears in every page's selector.
+
+---
+
 ## Dash Dashboard (`dashboard/`)
 
-Prototype UI built with Dash + Plotly + Bootstrap. Loads data from parquet files at startup (no live DB connection needed).
+Prototype UI built with Dash + Plotly + Bootstrap. Loads data from parquet files at startup (no live DB connection needed). **Status:** active reference while `webapp/` is being built; will be removed once `webapp/` reaches parity.
 
 ### Run
 
@@ -78,7 +124,7 @@ The dashboard imports `enginewash` directly from `../pythonlib` via a `sys.path`
 
 ## Legacy R Shiny App
 
-> **Legacy:** The R Shiny app is no longer under active development. The Python library and Dash dashboard are the active codebase.
+> **Legacy:** The R Shiny app is no longer under active development. The Python library, Reflex web app, and Dash dashboard are the active codebase.
 
 ### Running (if needed)
 
