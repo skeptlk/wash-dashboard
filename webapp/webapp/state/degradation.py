@@ -7,16 +7,29 @@ from typing import Optional
 
 import plotly.graph_objects as go
 import reflex as rx
-from enginewash.smoothing import running_mean
 
 from ..data import LOADED
 from ..data.derived import PARAMETER_BY_NAME, flights_for
-from ..trends import LifetimeTrend, compute_lifetime_trend, rank_engines_by_trend
+from ..trends import (
+    LifetimeTrend,
+    compute_group_trends,
+    compute_lifetime_trend,
+    detect_fast_spans,
+    rank_engines_by_trend,
+)
 from .base import GlobalState
 
 
 _PARAM_CHOICES = ["EGTHDM", "GWFM", "DEGT"]
 _SMOOTH_WINDOW = 30
+_GROUP_GAP_DAYS = 30.0
+_FAST_WINDOW_DAYS = 30.0
+_FAST_MIN_SPAN_DAYS = 7.0
+_FAST_MULTIPLIER = 10.0
+_GROUP_COLORS = (
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+)
 
 
 def _parse_date(s: str) -> Optional[datetime]:
@@ -129,42 +142,74 @@ class DegradationState(rx.State):
             self.chart_figure = fig
             return
 
-        trend = compute_lifetime_trend(flights, parameter)
+        overall = compute_lifetime_trend(flights, parameter)
+        groups = compute_group_trends(
+            flights,
+            parameter,
+            gap_days=_GROUP_GAP_DAYS,
+            smooth_window=_SMOOTH_WINDOW,
+        )
+
+        # Raw points (faint) so the underlying data stays visible behind the segments.
         flights.sort(key=lambda f: f.flight_datetime)
-        xs = [f.flight_datetime for f in flights]
-        ys = [f.float_value for f in flights]
         fig.add_trace(go.Scattergl(
-            x=xs,
-            y=ys,
+            x=[f.flight_datetime for f in flights],
+            y=[f.float_value for f in flights],
             mode="markers",
             name=parameter.name,
-            marker={"size": 4, "opacity": 0.5},
+            marker={"size": 3, "opacity": 0.25, "color": "#888"},
+            showlegend=True,
         ))
-        smoothed = running_mean(ys, window=_SMOOTH_WINDOW)
-        fig.add_trace(go.Scatter(
-            x=xs,
-            y=smoothed,
-            mode="lines",
-            name=f"Running mean ({_SMOOTH_WINDOW})",
-            line={"color": "steelblue", "width": 2},
-        ))
-        if trend.fitted_endpoints:
+
+        # Signed daily rate threshold; sign matches the parameter's direction so the
+        # comparison in detect_fast_spans works for both UP and DOWN parameters.
+        normal_per_day = self.normal_rate / 365.0
+        threshold_per_day = normal_per_day * _FAST_MULTIPLIER
+
+        for g in groups:
+            color = _GROUP_COLORS[g.group_id % len(_GROUP_COLORS)]
             fig.add_trace(go.Scatter(
-                x=[p.flight_datetime for p in trend.fitted_endpoints],
-                y=[p.value for p in trend.fitted_endpoints],
+                x=list(g.xs),
+                y=list(g.smoothed),
                 mode="lines",
-                name="Degradation trend",
-                line={"color": "darkorange", "width": 2, "dash": "dash"},
+                name=f"g{g.group_id} smooth ({g.n_points})",
+                line={"color": color, "width": 1.5},
+                opacity=0.8,
             ))
+            if g.fitted_endpoints:
+                rate_yr = g.slope_per_day * 365.0
+                fig.add_trace(go.Scatter(
+                    x=[p.flight_datetime for p in g.fitted_endpoints],
+                    y=[p.value for p in g.fitted_endpoints],
+                    mode="lines",
+                    name=f"g{g.group_id}: {rate_yr:+.1f}/yr",
+                    line={"color": color, "width": 2, "dash": "dash"},
+                ))
+
+            for span in detect_fast_spans(
+                g,
+                rate_threshold_per_day=threshold_per_day,
+                direction=parameter.trend_direction,
+                window_days=_FAST_WINDOW_DAYS,
+                min_span_days=_FAST_MIN_SPAN_DAYS,
+            ):
+                fig.add_vrect(
+                    x0=span.start_datetime,
+                    x1=span.end_datetime,
+                    fillcolor="red",
+                    opacity=0.12,
+                    layer="below",
+                    line_width=0,
+                )
 
         slope_str = (
-            f"{trend.slope_per_day * 365:+.2f} °C/yr"
-            if trend.slope_per_day == trend.slope_per_day
+            f"{overall.slope_per_day * 365:+.2f} °C/yr"
+            if overall.slope_per_day == overall.slope_per_day
             else "n/a"
         )
         r2_str = (
-            f"r²={trend.r_squared:.3f}"
-            if trend.r_squared == trend.r_squared
+            f"r²={overall.r_squared:.3f}"
+            if overall.r_squared == overall.r_squared
             else ""
         )
         fig.update_layout(

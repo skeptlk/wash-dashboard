@@ -7,7 +7,7 @@ we'll move it into the `enginewash` library.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
@@ -141,6 +141,200 @@ def compute_lifetime_trend(
         end_datetime=end,
         fitted_endpoints=fitted_endpoints,
     )
+
+
+@dataclass(frozen=True)
+class GroupTrend:
+    """Per-segment trend within an engine's series, split by gaps in flight dates.
+
+    Attributes:
+        group_id: 0-based index of this segment in the engine's series.
+        xs: Flight timestamps in this segment (sorted ascending).
+        ys: Raw parameter values, aligned to xs.
+        smoothed: Centered running-mean values aligned to xs.
+        slope_per_day: OLS slope in parameter-units per day; NaN if n_points < 2.
+        intercept: Intercept at start_datetime.
+        n_points: Number of observations in this segment.
+        start_datetime: First timestamp.
+        end_datetime: Last timestamp.
+        fitted_endpoints: Two PlotPoints for drawing the dashed fit; empty when n < 2.
+    """
+
+    group_id: int
+    xs: tuple[datetime, ...]
+    ys: tuple[float, ...]
+    smoothed: tuple[float, ...]
+    slope_per_day: float
+    intercept: float
+    n_points: int
+    start_datetime: datetime
+    end_datetime: datetime
+    fitted_endpoints: tuple[PlotPoint, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class FastSpan:
+    """A time range where the rolling slope is at-or-beyond the fast-degradation threshold."""
+
+    start_datetime: datetime
+    end_datetime: datetime
+
+
+def _filter_matched(flights: list[FlightRecord], parameter: WashParameter) -> list[FlightRecord]:
+    matched = [
+        f for f in flights
+        if f.parameter_name == parameter.name
+        and f.flight_phase == parameter.flight_phase
+        and f.float_value is not None
+        and not np.isnan(f.float_value)
+    ]
+    matched.sort(key=lambda f: f.flight_datetime)
+    return matched
+
+
+def segment_by_gaps(
+    flights: list[FlightRecord],
+    parameter: WashParameter,
+    gap_days: float = 30.0,
+) -> list[list[FlightRecord]]:
+    """Filter to `parameter`, sort by time, and split where consecutive flights are
+    more than `gap_days` apart.
+    """
+    matched = _filter_matched(flights, parameter)
+    if not matched:
+        return []
+
+    groups: list[list[FlightRecord]] = [[matched[0]]]
+    gap = timedelta(days=gap_days)
+    for prev, cur in zip(matched, matched[1:]):
+        if cur.flight_datetime - prev.flight_datetime > gap:
+            groups.append([cur])
+        else:
+            groups[-1].append(cur)
+    return groups
+
+
+def compute_group_trends(
+    flights: list[FlightRecord],
+    parameter: WashParameter,
+    gap_days: float = 30.0,
+    smooth_window: int = 30,
+) -> list[GroupTrend]:
+    """Segment by gaps and compute a smoothed series + OLS fit per segment."""
+    groups = segment_by_gaps(flights, parameter, gap_days=gap_days)
+    out: list[GroupTrend] = []
+    for gid, g in enumerate(groups):
+        xs = tuple(f.flight_datetime for f in g)
+        ys_arr = np.asarray([f.float_value for f in g], dtype=np.float64)
+        smoothed_arr = running_mean(ys_arr, window=smooth_window) if len(g) >= 1 else ys_arr
+        n = len(g)
+        start = xs[0]
+        end = xs[-1]
+
+        if n < 2 or start == end:
+            out.append(GroupTrend(
+                group_id=gid,
+                xs=xs,
+                ys=tuple(float(v) for v in ys_arr),
+                smoothed=tuple(float(v) for v in smoothed_arr),
+                slope_per_day=float("nan"),
+                intercept=float(ys_arr[0]) if n else float("nan"),
+                n_points=n,
+                start_datetime=start,
+                end_datetime=end,
+            ))
+            continue
+
+        t_days = np.asarray(
+            [(t - start).total_seconds() / 86400.0 for t in xs], dtype=np.float64
+        )
+        slope, intercept = np.polyfit(t_days, ys_arr, 1)
+        end_days = (end - start).total_seconds() / 86400.0
+        fitted = (
+            PlotPoint(flight_datetime=start, value=float(intercept)),
+            PlotPoint(flight_datetime=end, value=float(intercept + slope * end_days)),
+        )
+        out.append(GroupTrend(
+            group_id=gid,
+            xs=xs,
+            ys=tuple(float(v) for v in ys_arr),
+            smoothed=tuple(float(v) for v in smoothed_arr),
+            slope_per_day=float(slope),
+            intercept=float(intercept),
+            n_points=n,
+            start_datetime=start,
+            end_datetime=end,
+            fitted_endpoints=fitted,
+        ))
+    return out
+
+
+def detect_fast_spans(
+    group: GroupTrend,
+    rate_threshold_per_day: float,
+    direction: TrendDirection,
+    window_days: float = 30.0,
+    min_span_days: float = 7.0,
+) -> list[FastSpan]:
+    """Find contiguous sub-spans where the smoothed series degrades faster than the threshold.
+
+    For each point of the smoothed series we fit a centered local slope over a
+    ±window_days/2 neighborhood (in days), and flag the point as "fast" when its
+    slope is at-or-beyond `rate_threshold_per_day`. We then return one
+    FastSpan per maximal contiguous run of flagged points.
+
+    The threshold is a *signed* daily rate. For UP parameters (e.g. EGTHDM —
+    higher is better, degradation is negative), a point is flagged when
+    `slope <= rate_threshold_per_day`. For DOWN parameters (lower is better),
+    when `slope >= rate_threshold_per_day`.
+
+    Runs shorter than `min_span_days` are dropped to suppress noise from
+    isolated dips in the smoothed series.
+    """
+    n = len(group.xs)
+    if n < 3:
+        return []
+
+    dates = list(group.xs)
+    values = np.asarray(group.smoothed, dtype=np.float64)
+    if np.any(np.isnan(values)):
+        return []
+
+    t = np.asarray(
+        [(d - dates[0]).total_seconds() / 86400.0 for d in dates],
+        dtype=np.float64,
+    )
+    sign = direction.value  # +1 (UP) or -1 (DOWN)
+    half = window_days / 2.0
+
+    is_fast = np.zeros(n, dtype=bool)
+    for i in range(n):
+        lo = int(np.searchsorted(t, t[i] - half, side="left"))
+        hi = int(np.searchsorted(t, t[i] + half, side="right"))
+        if hi - lo < 3:
+            continue
+        tt = t[lo:hi]
+        yy = values[lo:hi]
+        if np.unique(tt).size < 2:
+            continue
+        slope = np.polyfit(tt, yy, 1)[0]
+        if sign * slope <= sign * rate_threshold_per_day:
+            is_fast[i] = True
+
+    spans: list[FastSpan] = []
+    i = 0
+    while i < n:
+        if not is_fast[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and is_fast[j + 1]:
+            j += 1
+        if (t[j] - t[i]) >= min_span_days:
+            spans.append(FastSpan(start_datetime=dates[i], end_datetime=dates[j]))
+        i = j + 1
+
+    return spans
 
 
 def rank_engines_by_trend(
