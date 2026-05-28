@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import reflex as rx
 
+from ..state.auth import AuthState
+
 
 _NAV_ITEMS = [
     ("Long-Term Degradation", "/", "trending-down"),
@@ -51,6 +53,16 @@ def _header(active_route: str) -> rx.Component:
                 spacing="2",
                 align="center",
                 flex="1",
+            ),
+            rx.tooltip(
+                rx.icon_button(
+                    rx.icon("log-out", size=16),
+                    on_click=AuthState.logout,
+                    variant="ghost",
+                    color_scheme="gray",
+                    cursor="pointer",
+                ),
+                content="Sign out",
             ),
             rx.color_mode.button(),
             spacing="4",

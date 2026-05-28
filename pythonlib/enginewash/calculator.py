@@ -8,6 +8,8 @@ and returns results. Database access is the caller's responsibility.
 from __future__ import annotations
 
 import dataclasses
+from collections import OrderedDict
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -26,21 +28,18 @@ from .models import (
 from .plot import build_wash_plot
 from .smoothing import smooth_series
 from .utilization import UtilizationLookup, build_utilization_lookup, lookup_utilization
-from collections import OrderedDict
 
 
 class WashCalculator:
     """Calculate engine wash effects from flight and maintenance data.
 
-    Implements the full processing pipeline:
-      1. Anchor wash events to flight records
-      2. Segment time series by wash events (cumulative event index)
-      3. Smooth parameter values per segment
-      4. Compute before/after wash deltas
-      5. Detect loss-of-efficiency points
+    1. Anchor wash events to flight records
+    2. Segment time series by wash events (cumulative event index)
+    3. Smooth parameter values per segment
+    4. Compute before/after wash deltas
+    5. Detect loss-of-efficiency points
 
     Usage:
-
         calc = WashCalculator(config=WashConfig())
         summaries = calc.process(
             flights=[FlightRecord(...)],
@@ -79,11 +78,13 @@ class WashCalculator:
             return engine_results, all_events
 
         for engine_id, eng_flights in flights_df.groupby("engine_id"):
-            eng_maint = maintenance_df[maintenance_df["engine_id"] == engine_id]
+            eng_maint = maintenance_df.query("engine_id == @engine_id")
             df = self._prepare_data(eng_flights, eng_maint)
             df["event_cum"] = df["event"].cumsum()
             df = self._apply_smoothing(df)
-            events = self._compute_deltas(df, str(engine_id), parameter, utilization_lookup)
+            events = self._compute_deltas(
+                df, str(engine_id), parameter, utilization_lookup
+            )
             engine_results.append((str(engine_id), df))
             all_events.extend(events)
 
@@ -94,7 +95,7 @@ class WashCalculator:
         flights: list[FlightRecord],
         maintenances: list[MaintenanceRecord],
         parameter: WashParameter,
-        utilization: list[UtilizationRecord] | None = None,
+        utilizations: list[UtilizationRecord] | None = None,
     ) -> list[WashEventSummary]:
         """Run the full wash-effect analysis for one parameter.
 
@@ -102,14 +103,16 @@ class WashCalculator:
             flights: Flight records, one per flight.
             maintenances: Wash/maintenance events.
             parameter: Parameter configuration.
-            utilization: Optional engine utilization records. When provided,
+            utilizations: Optional engine utilization records. When provided,
                 cycles_loss_of_efficiency and hours_loss_of_efficiency are calculated
 
         Returns:
             List of WashEventSummary, one per wash event.
         """
-        lookup = build_utilization_lookup(utilization or [])
-        _engine_dfs, events = self._run_pipeline(flights, maintenances, parameter, lookup)
+        lookup = build_utilization_lookup(utilizations or [])
+        _engine_dfs, events = self._run_pipeline(
+            flights, maintenances, parameter, lookup
+        )
         return self._build_summaries(events)
 
     def build_plot(
@@ -136,13 +139,12 @@ class WashCalculator:
         engine_dfs, events = self._run_pipeline(flights, maintenances, parameter)
         return build_wash_plot(engine_dfs, events, self.config.n_obs_mean)
 
-
     def process_all(
         self,
         flights: list[FlightRecord],
         maintenances: list[MaintenanceRecord],
         parameters: list[WashParameter] | None = None,
-        utilization: list[UtilizationRecord] | None = None,
+        utilizations: list[UtilizationRecord] | None = None,
     ) -> list[WashEventSummary]:
         """Run wash-effect analysis for all configured parameters and merge.
 
@@ -153,22 +155,27 @@ class WashCalculator:
             flights: Flight records (see process() for schema).
             maintenances: Wash/maintenance events (see process() for schema).
             parameters: Parameters to analyze. Defaults to config.parameters.
-            utilization: Optional engine utilization records (see process()).
+            utilizations: Optional engine utilization records (see process()).
 
         Returns:
             List of WashEventSummary items with WashEvent results for each parameter.
         """
         params = parameters or self.config.parameters
-        lookup = build_utilization_lookup(utilization or [])
+        lookup = build_utilization_lookup(utilizations or [])
         all_events: list[WashEvent] = []
 
         for param in params:
             param_flights = [
-                f for f in flights
-                if f.parameter_name == param.name and f.flight_phase == param.flight_phase
+                f
+                for f in flights
+                if f.parameter_name == param.name
+                and f.flight_phase == param.flight_phase
             ]
             _engine_dfs, events = self._run_pipeline(
-                param_flights, maintenances, param, lookup,
+                param_flights,
+                maintenances,
+                param,
+                lookup,
             )
             all_events.extend(events)
 
@@ -182,7 +189,11 @@ class WashCalculator:
         Each wash is attached to the first flight after the maintenance datetime.
         """
         df = flights_df.copy()
-        df["flight_datetime"] = pd.to_datetime(df["flight_datetime"])
+        # df["flight_datetime"] = pd.to_datetime(df["flight_datetime"])
+        if df["flight_datetime"].dt.tz is not None:
+            df["flight_datetime"] = (
+                df["flight_datetime"].dt.tz_convert("UTC").dt.tz_localize(None)
+            )
         df = df.sort_values("flight_datetime").reset_index(drop=True)
 
         if "float_value_smooth" not in df.columns:
@@ -190,9 +201,9 @@ class WashCalculator:
 
         # Where pre-smoothed values are missing, fill with a running mean of raw values
         missing = df["float_value_smooth"].isna()
-        if missing.any():
+        if bool(missing.any()):
             smoothed_raw = smooth_series(
-                df.loc[missing, "float_value"],
+                df.loc[missing, "float_value"],  # pyright: ignore[reportArgumentType]
                 window=self.config.pre_smooth_window,
             )
             df.loc[missing, "float_value_smooth"] = smoothed_raw
@@ -205,7 +216,11 @@ class WashCalculator:
             return df
 
         maint = maintenance_df.copy()
-        maint["maint_datetime"] = pd.to_datetime(maint["maint_datetime"])
+        # maint["maint_datetime"] = pd.to_datetime(maint["maint_datetime"])
+        if maint["maint_datetime"].dt.tz is not None:
+            maint["maint_datetime"] = (
+                maint["maint_datetime"].dt.tz_convert("UTC").dt.tz_localize(None)
+            )
 
         for _, wash in maint.iterrows():
             mdt = wash["maint_datetime"]
@@ -226,9 +241,9 @@ class WashCalculator:
 
         for _, grp in df.groupby("event_cum"):
             smoothed = smooth_series(
-                grp["float_value_smooth"],
+                grp["float_value_smooth"],  # pyright: ignore[reportArgumentType]
                 window=self.config.smooth_window,
-                fallback=grp["float_value"],
+                fallback=grp["float_value"],  # pyright: ignore[reportArgumentType]
             )
             df.loc[grp.index, "float_value_smooth_custom"] = smoothed
 
@@ -248,16 +263,21 @@ class WashCalculator:
         lookup: UtilizationLookup = utilization_lookup or {}
 
         seg_indices = df.groupby("event_cum").indices
-        smooth_values = df["float_value_smooth_custom"].values
-        time_values = df["flight_datetime"].values
-        event_values = df["event"].values
+        smooth_values = df["float_value_smooth_custom"].to_numpy()
+        time_values = df["flight_datetime"].to_numpy()
+        event_values = df["event"].to_numpy()
         cart = parameter.direction
-        max_seg = int(df["event_cum"].max())
+        max_seg = int(df["event_cum"].max())  # pyright: ignore[reportArgumentType]
 
         for seg in range(1, max_seg + 1):
             prev_idx = seg_indices.get(seg - 1)
             curr_idx = seg_indices.get(seg)
-            if prev_idx is None or curr_idx is None or not len(prev_idx) or not len(curr_idx):
+            if (
+                prev_idx is None
+                or curr_idx is None
+                or not len(prev_idx)
+                or not len(curr_idx)
+            ):
                 continue
 
             prev_smooth = smooth_values[prev_idx]
@@ -269,7 +289,11 @@ class WashCalculator:
             )
 
             time_loe = detect_loss_of_efficiency(
-                curr_smooth, curr_times, mean_before, parameter.threshold, cart,
+                curr_smooth,
+                curr_times,
+                mean_before,
+                parameter.threshold,
+                cart,
             )
 
             # Maint metadata sits on the first flight of the segment (the anchor row)
@@ -279,20 +303,22 @@ class WashCalculator:
             if len(anchor_local):
                 anchor_row = df.iloc[curr_idx[anchor_local[0]]]
                 mdt_raw = anchor_row["maint_datetime"]
-                if pd.notna(mdt_raw):
+                if isinstance(mdt_raw, pd.Timestamp):
                     maint_dt = mdt_raw.to_pydatetime()
                 ata_raw = anchor_row["ata_code"]
                 if pd.notna(ata_raw):
                     ata = ata_raw
 
-            time_loe_dt = (
-                pd.Timestamp(time_loe).to_pydatetime() if time_loe is not None else None
+            time_loe_dt: datetime | None = (
+                time_loe.to_pydatetime() if time_loe is not None else None
             )
 
             cyc_wash, hrs_wash = lookup_utilization(lookup, engine_id, maint_dt)
             cyc_loss, hrs_loss = lookup_utilization(lookup, engine_id, time_loe_dt)
             cycles_loe = (
-                cyc_loss - cyc_wash if cyc_wash is not None and cyc_loss is not None else None
+                cyc_loss - cyc_wash
+                if cyc_wash is not None and cyc_loss is not None
+                else None
             )
             hours_loe = (
                 int(round(hrs_loss - hrs_wash))
