@@ -30,6 +30,20 @@ def _parse_date(s: str) -> Optional[datetime]:
         return None
 
 
+def _sort_key(value):
+    """Sort key that tolerates mixed/missing values within a column.
+
+    None and placeholder strings sort to the end (in ascending order).
+    """
+    if value is None or value == "" or value == "—":
+        return (1, 0)
+    if isinstance(value, bool):
+        return (0, value)
+    if isinstance(value, (int, float)):
+        return (0, value)
+    return (0, str(value).lower())
+
+
 def _event_to_row(ev, label: str) -> dict:
     return {
         "engine_id": ev.engine_id,
@@ -68,6 +82,10 @@ class AnalysisState(rx.State):
     active_engine_id: str = ""
     n_events: int = 0
 
+    # Click-to-sort: dict key of the active column, and direction.
+    sort_column: str = ""
+    sort_ascending: bool = True
+
     # Results for the frontend
     summary_rows: list[dict] = []
     chart_figure: go.Figure = go.Figure()
@@ -79,6 +97,24 @@ class AnalysisState(rx.State):
     @rx.var
     def parameter_options(self) -> list[str]:
         return _PARAM_CHOICES
+
+    @rx.var
+    def sorted_summary_rows(self) -> list[dict]:
+        if not self.sort_column:
+            return self.summary_rows
+        return sorted(
+            self.summary_rows,
+            key=lambda r: _sort_key(r.get(self.sort_column)),
+            reverse=not self.sort_ascending,
+        )
+
+    @rx.event
+    def sort_by(self, column: str):
+        if self.sort_column == column:
+            self.sort_ascending = not self.sort_ascending
+        else:
+            self.sort_column = column
+            self.sort_ascending = True
 
     @rx.event
     def set_selected_parameter(self, value: str):

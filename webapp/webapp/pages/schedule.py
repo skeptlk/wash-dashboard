@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import reflex as rx
 
+from ..components.plotly_sync import range_sync_plotly
 from ..components.selectors import aircraft_type_selector, date_range_picker
 from ..components.shell import page_shell
 from ..state.schedule import ScheduleState
@@ -90,19 +91,47 @@ def _results_panel() -> rx.Component:
             rx.cond(
                 ScheduleState.has_results,
                 rx.vstack(
-                    rx.text(
-                        ScheduleState.summary_text,
-                        size="2",
-                        color="var(--gray-11)",
-                    ),
-                    rx.plotly(
-                        data=ScheduleState.gantt_figure,
+                    rx.hstack(
+                        rx.text(
+                            ScheduleState.summary_text,
+                            size="2",
+                            color="var(--gray-11)",
+                        ),
+                        rx.spacer(),
+                        rx.text(
+                            "Click an event to open it in Wash Analysis →",
+                            size="1",
+                            color="var(--gray-10)",
+                        ),
                         width="100%",
-                        height="100%",
+                        align="center",
+                    ),
+
+                    range_sync_plotly(
+                        data=ScheduleState.nav_figure,
+                        on_relayout=ScheduleState.sync_time_window,
+                        # width="100%",
+                        # height="100px",
+                        # background_color="blue",
+                    ),
+                    # Tall per-engine chart in a scrollable area; the timeline
+                    # navigator below stays pinned so it's always reachable.
+                    rx.box(
+                        rx.plotly(
+                            data=ScheduleState.gantt_figure,
+                            on_click=ScheduleState.open_in_analysis,
+                            width="100%",
+                        ),
+                        overflow_y="auto",
+                        flex="1",
+                        min_height="0",
+                        width="100%",
                     ),
                     spacing="2",
                     align="stretch",
                     width="100%",
+                    # height="calc(100vh)",
+                    # background_color="red",
                 ),
                 rx.callout(
                     rx.cond(
@@ -126,11 +155,6 @@ def schedule_page() -> rx.Component:
     return page_shell(
         "/schedule",
         rx.vstack(
-            rx.heading("Wash Schedule", size="7"),
-            rx.text(
-                "Wash events per engine over time, coloured by ATA code.",
-                color="var(--gray-11)",
-            ),
             rx.hstack(
                 _control_panel(),
                 _results_panel(),

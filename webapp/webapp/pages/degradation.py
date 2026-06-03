@@ -100,21 +100,43 @@ def _ranked_table_row(row: rx.Var) -> rx.Component:
     )
 
 
+def _sortable_header(label: str, column: str) -> rx.Component:
+    return rx.table.column_header_cell(
+        rx.hstack(
+            rx.text(label),
+            rx.cond(
+                DegradationState.sort_column == column,
+                rx.cond(
+                    DegradationState.sort_ascending,
+                    rx.icon("chevron-up", size=14),
+                    rx.icon("chevron-down", size=14),
+                ),
+                rx.fragment(),
+            ),
+            spacing="1",
+            align="center",
+        ),
+        on_click=DegradationState.sort_by(column),
+        cursor="pointer",
+        _hover={"background_color": "var(--gray-3)"},
+    )
+
+
 def _ranked_table() -> rx.Component:
     return rx.box(
         rx.table.root(
             rx.table.header(
                 rx.table.row(
-                    rx.table.column_header_cell("Engine"),
-                    rx.table.column_header_cell("°C / yr"),
-                    rx.table.column_header_cell("r²"),
-                    rx.table.column_header_cell("n"),
-                    rx.table.column_header_cell("Start"),
-                    rx.table.column_header_cell("End"),
+                    _sortable_header("Engine", "label"),
+                    _sortable_header("°C / yr", "slope_per_year"),
+                    _sortable_header("r²", "r_squared"),
+                    _sortable_header("n", "n_points"),
+                    _sortable_header("Start", "start"),
+                    _sortable_header("End", "end"),
                 ),
             ),
             rx.table.body(
-                rx.foreach(DegradationState.ranked_rows, _ranked_table_row),
+                rx.foreach(DegradationState.sorted_ranked_rows, _ranked_table_row),
             ),
             variant="surface",
             size="2",
@@ -134,7 +156,7 @@ def _results_panel() -> rx.Component:
         rx.cond(
             DegradationState.has_results,
             rx.vstack(
-                rx.heading("Ranked engines (worst degrader first)", size="4"),
+                rx.heading("Engine lifetime degradation", size="4"),
                 _ranked_table(),
                 rx.divider(),
                 rx.heading("Selected engine", size="4"),
@@ -160,7 +182,6 @@ def degradation_page() -> rx.Component:
     return page_shell(
         "/",
         rx.vstack(
-            rx.heading("Long-Term Degradation", size="7"),
             rx.hstack(
                 _control_panel(),
                 _results_panel(),

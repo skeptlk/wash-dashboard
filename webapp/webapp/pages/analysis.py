@@ -150,6 +150,28 @@ def _summary_row(row: rx.Var) -> rx.Component:
     )
 
 
+def _sortable_header(label: str, column: str) -> rx.Component:
+    return rx.table.column_header_cell(
+        rx.hstack(
+            rx.text(label),
+            rx.cond(
+                AnalysisState.sort_column == column,
+                rx.cond(
+                    AnalysisState.sort_ascending,
+                    rx.icon("chevron-up", size=14),
+                    rx.icon("chevron-down", size=14),
+                ),
+                rx.fragment(),
+            ),
+            spacing="1",
+            align="center",
+        ),
+        on_click=AnalysisState.sort_by(column),
+        cursor="pointer",
+        _hover={"background_color": "var(--gray-3)"},
+    )
+
+
 def _summary_table() -> rx.Component:
     return rx.vstack(
         rx.text(
@@ -161,19 +183,19 @@ def _summary_table() -> rx.Component:
             rx.table.root(
                 rx.table.header(
                     rx.table.row(
-                        rx.table.column_header_cell("Engine"),
-                        rx.table.column_header_cell("#"),
-                        rx.table.column_header_cell("Date"),
-                        rx.table.column_header_cell("ATA"),
-                        rx.table.column_header_cell("Before"),
-                        rx.table.column_header_cell("After"),
-                        rx.table.column_header_cell("Δ"),
-                        rx.table.column_header_cell("LoE date"),
-                        rx.table.column_header_cell("Days"),
+                        _sortable_header("Engine", "engine_label"),
+                        _sortable_header("#", "event_index"),
+                        _sortable_header("Date", "maint_date"),
+                        _sortable_header("ATA", "ata_code"),
+                        _sortable_header("Before", "mean_before"),
+                        _sortable_header("After", "mean_after"),
+                        _sortable_header("Δ", "delta"),
+                        _sortable_header("LoE date", "loe_date"),
+                        _sortable_header("Days", "loe_days"),
                     ),
                 ),
                 rx.table.body(
-                    rx.foreach(AnalysisState.summary_rows, _summary_row),
+                    rx.foreach(AnalysisState.sorted_summary_rows, _summary_row),
                 ),
                 variant="surface",
                 size="1",
@@ -226,7 +248,6 @@ def analysis_page() -> rx.Component:
     return page_shell(
         "/analysis",
         rx.vstack(
-            rx.heading("Wash Analysis", size="7"),
             rx.hstack(
                 _control_panel(),
                 _results_panel(),

@@ -41,6 +41,20 @@ def _parse_date(s: str) -> Optional[datetime]:
         return None
 
 
+def _sort_key(value):
+    """Sort key that tolerates mixed/missing values within a column.
+
+    None and placeholder strings sort to the end (in ascending order).
+    """
+    if value is None or value == "" or value == "—":
+        return (1, 0)
+    if isinstance(value, bool):
+        return (0, value)
+    if isinstance(value, (int, float)):
+        return (0, value)
+    return (0, str(value).lower())
+
+
 def _trend_to_row(t: LifetimeTrend, label: str) -> dict:
     valid = t.slope_per_day == t.slope_per_day  # False when NaN
     return {
@@ -67,6 +81,10 @@ class DegradationState(rx.State):
     # Serialized list[LifetimeTrend] → row dicts for rx.data_table.
     ranked_rows: list[dict] = []
 
+    # Click-to-sort: dict key of the active column, and direction.
+    sort_column: str = ""
+    sort_ascending: bool = True
+
     # Selected engine's plotly figure, built once on the backend (Reflex requires
     # the figure to be a single go.Figure-typed Var, not a dict of Vars).
     chart_figure: go.Figure = go.Figure()
@@ -74,6 +92,24 @@ class DegradationState(rx.State):
     @rx.var
     def parameter_options(self) -> list[str]:
         return _PARAM_CHOICES
+
+    @rx.var
+    def sorted_ranked_rows(self) -> list[dict]:
+        if not self.sort_column:
+            return self.ranked_rows
+        return sorted(
+            self.ranked_rows,
+            key=lambda r: _sort_key(r.get(self.sort_column)),
+            reverse=not self.sort_ascending,
+        )
+
+    @rx.event
+    def sort_by(self, column: str):
+        if self.sort_column == column:
+            self.sort_ascending = not self.sort_ascending
+        else:
+            self.sort_column = column
+            self.sort_ascending = True
 
     @rx.event
     def set_selected_parameter(self, value: str):

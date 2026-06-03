@@ -85,15 +85,19 @@ def prepare_schedule(bundle) -> dict:
     }
 
 
-def build_gantt_figure(
+# Theme-neutral structural styling only — no template / bg / font colours, so
+_GRID = "rgba(127,127,127,0.18)"
+_FONT = "Inter, Arial, sans-serif"
+_ROW_PX = 22
+
+
+def _filter_df(
     df: pd.DataFrame,
-    ata_color: dict,
-    aircraft_filter: Optional[list[str]] = None,
-    ata_filter: Optional[list[str]] = None,
-    start: Optional[datetime] = None,
-    end: Optional[datetime] = None,
-) -> tuple[go.Figure, int]:
-    """Filter df and build the Plotly Gantt figure. Returns (figure, n_events)."""
+    aircraft_filter: Optional[list[str]],
+    ata_filter: Optional[list[str]],
+    start: Optional[datetime],
+    end: Optional[datetime],
+) -> pd.DataFrame:
     if aircraft_filter:
         df = df[df["aircraft_reg"].isin(aircraft_filter)]
     if ata_filter:
@@ -102,13 +106,11 @@ def build_gantt_figure(
         df = df[df["maint_datetime"] >= pd.Timestamp(start)]
     if end:
         df = df[df["maint_datetime"] <= pd.Timestamp(end) + pd.Timedelta(days=1)]
+    return df
 
-    if df.empty:
-        fig = go.Figure()
-        fig.update_layout(title="No events match the filters.", height=300)
-        return fig, 0
 
-    eng_order = (
+def _engine_order(df: pd.DataFrame) -> list[str]:
+    return (
         df.drop_duplicates("engine_id_str")
         .assign(
             _sort_family=lambda d: d["engine_label"].map(_label_family_key),
@@ -122,6 +124,18 @@ def build_gantt_figure(
         .tolist()
     )
 
+
+def build_main_figure(
+    df: pd.DataFrame,
+    ata_color: dict,
+    eng_order: list[str],
+    x_range: Optional[list] = None,
+) -> go.Figure:
+    """Tall per-engine chart (no rangeslider) — meant for a scrollable container.
+
+    Its height grows with the engine count so every row stays readable; the time
+    window is controlled externally via ``x_range`` (set from the navigator).
+    """
     fig = go.Figure()
 
     # Thin connector lines between events per engine
@@ -134,7 +148,7 @@ def build_gantt_figure(
             x=grp["maint_datetime"],
             y=[eng_label] * len(grp),
             mode="lines",
-            line={"color": "rgba(128,128,128,0.35)", "width": 1},
+            line={"color": "rgba(99,110,131,0.45)", "width": 1},
             showlegend=False,
             hoverinfo="skip",
             customdata=[eid] * len(grp),
@@ -148,34 +162,128 @@ def build_gantt_figure(
             y=sub["engine_label"],
             mode="markers",
             marker={
-                "size": 9,
+                "size": 11,
                 "color": ata_color.get(ata, "#888"),
-                "line": {"color": "white", "width": 0.5},
+                "line": {"color": "rgba(8,48,107,0.55)", "width": 1.2},
+                "opacity": 0.95,
             },
             name=f"ATA {ata}",
             customdata=sub["engine_id_str"].tolist(),
             hovertemplate="<b>%{y}</b><br>%{x|%Y-%m-%d}<br>ATA " + ata + "<extra></extra>",
         ))
 
-    chart_height = max(400, 18 * len(eng_order) + 120)
+    chart_height = max(360, _ROW_PX * len(eng_order) + 100)
+    xaxis = {
+        "title": "",
+        "type": "date",
+        "side": "top",
+        "showgrid": True,
+        "gridcolor": _GRID,
+        "dtick": "M1",
+        "tickformat": "%b %Y",
+        "ticklabelmode": "period",
+        "tickson": "boundaries",
+        "ticks": "outside",
+        "ticklen": 6,
+        "tickcolor": _GRID,
+        "tickfont": {"family": _FONT, "size": 11},
+    }
+    if x_range:
+        xaxis["range"] = x_range
+        xaxis["autorange"] = False
     fig.update_layout(
         yaxis={
             "categoryorder": "array",
             "categoryarray": eng_order,
             "title": "",
             "automargin": True,
-            "tickfont": {"size": 10},
+            "showgrid": True,
+            "gridcolor": _GRID,
+            "ticklen": 6,
+            "tickcolor": "rgba(0,0,0,0)",
+            "tickfont": {"family": _FONT, "size": 10},
         },
-        xaxis={"title": "Date", "type": "date"},
+        xaxis=xaxis,
         height=chart_height,
-        margin={"t": 48, "r": 20, "b": 40, "l": 20},
+        margin={"t": 44, "r": 24, "b": 8, "l": 24},
         hovermode="closest",
-        legend={"orientation": "h", "y": 1.02, "x": 0, "yanchor": "bottom"},
-        title={
-            "text": f"Wash schedule — {len(df):,} events across {len(eng_order)} engines",
-            "font": {"size": 14},
-            "x": 0,
-            "xanchor": "left",
+        showlegend=False,
+    )
+    return fig
+
+
+
+def build_nav_figure(df: pd.DataFrame, ata_color: dict) -> go.Figure:
+    """The timeline scrubber: a compact plain rangeslider + quick-range buttons.
+
+    Deliberately *not* a chart — a single invisible trace defines the date
+    extent so the slider spans all events, and the area above it is left blank
+    (no duplicate "mini chart"). The quick-range buttons and an ATA colour
+    legend sit in the top margin. Dragging the slider (or a button) pans/zooms
+    the tall main chart via ``on_relayout`` → ``sync_time_window``.
+    """
+    xs = df["maint_datetime"]
+    x0, x1 = xs.min(), xs.max()
+
+    fig = go.Figure()
+    # Invisible trace: only there to give the rangeslider its full date extent.
+    fig.add_trace(go.Scatter(
+        x=[x0, x1], y=[0, 0], mode="markers",
+        marker={"opacity": 0}, hoverinfo="skip", showlegend=False,
+    ))
+    # Legend-only swatches (no data) so ATA colours stay documented without
+    # drawing anything in the slider.
+    for ata in sorted(df["ata_code"].unique()):
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers",
+            marker={"size": 9, "color": ata_color.get(ata, "#888")},
+            name=f"ATA {ata}",
+        ))
+
+    fig.update_layout(
+        yaxis={"visible": False, "fixedrange": True, "range": [-1, 1]},
+        xaxis={
+            "title": "",
+            "type": "date",
+            "showline": False,
+            "zeroline": False,
+            "rangeslider": {
+                "visible": True,
+                "thickness": 1.0,
+                "borderwidth": 1,
+                "autorange": True,
+            },
+        },
+        height=110,
+        margin={"t": 0, "r": 0, "b": 0, "l": 0},
+        hovermode=False,
+        legend={
+            "orientation": "h",
+            "y": 1.0,
+            "x": 1,
+            "xanchor": "right",
+            "yanchor": "bottom",
+            "title": "",
+            "font": {"family": _FONT, "size": 12},
         },
     )
-    return fig, len(df)
+    return fig
+
+
+def build_schedule_figures(
+    df: pd.DataFrame,
+    ata_color: dict,
+    aircraft_filter: Optional[list[str]] = None,
+    ata_filter: Optional[list[str]] = None,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+) -> tuple[go.Figure, go.Figure, int]:
+    """Filter and build (main_figure, nav_figure, n_events)."""
+    df = _filter_df(df, aircraft_filter, ata_filter, start, end)
+    if df.empty:
+        empty = go.Figure()
+        empty.update_layout(title="No events match the filters.", height=300)
+        return empty, go.Figure(), 0
+
+    eng_order = _engine_order(df)
+    return build_main_figure(df, ata_color, eng_order), build_nav_figure(df, ata_color), len(df)
