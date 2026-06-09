@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import reflex as rx
 
-from ..components.selectors import aircraft_type_selector, date_range_picker
+from ..components.selectors import (
+    aircraft_type_selector,
+    date_range_picker,
+    filterable_checklist,
+)
 from ..components.shell import page_shell
 from ..state.analysis import AnalysisState
 
@@ -30,7 +34,7 @@ def _num_input(label: str, value: rx.Var, on_change, min_val: int = 1) -> rx.Com
 def _control_panel() -> rx.Component:
     return rx.vstack(
         rx.heading("Controls", size="4"),
-        aircraft_type_selector(),
+        aircraft_type_selector(on_toggle=AnalysisState.toggle_aircraft_type),
         date_range_picker(),
         # Parameter
         rx.vstack(
@@ -46,39 +50,17 @@ def _control_panel() -> rx.Component:
             width="100%",
         ),
         # Engine multi-select
-        rx.vstack(
-            rx.hstack(
-                rx.text("Engines", size="2", weight="medium"),
-                rx.spacer(),
-                rx.button(
-                    "Clear",
-                    on_click=AnalysisState.clear_engines,
-                    size="1",
-                    variant="ghost",
-                ),
-                width="100%",
-                align="center",
-            ),
-            rx.scroll_area(
-                rx.vstack(
-                    rx.foreach(
-                        AnalysisState.available_engines_list,
-                        lambda eid: rx.checkbox(
-                            eid,
-                            checked=AnalysisState.selected_engine_ids.contains(eid),
-                            on_change=AnalysisState.set_engine_checked(eid),
-                            size="1",
-                        ),
-                    ),
-                    spacing="1",
-                    align="start",
-                ),
-                max_height="160px",
-                width="100%",
-            ),
-            spacing="1",
-            align="stretch",
-            width="100%",
+        filterable_checklist(
+            title="Engines",
+            search_value=AnalysisState.engine_search,
+            on_search_change=AnalysisState.set_engine_search,
+            filtered_items=AnalysisState.filtered_engines,
+            selected_set=AnalysisState.selected_engine_ids,
+            on_item_check=AnalysisState.set_engine_checked,
+            on_select_all=AnalysisState.select_all_engines,
+            on_clear=AnalysisState.clear_engines,
+            max_height="160px",
+            search_placeholder="Search engine / aircraft…",
         ),
         # Smoothing & detection
         rx.divider(),

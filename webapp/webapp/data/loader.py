@@ -34,6 +34,14 @@ class AircraftBundle:
 
 _AC_FAMILY_ORDER = {"A": 0, "B": 1, "E": 2}
 
+# Short display names for verbose aircraft-family strings (saves space in labels).
+_FAMILY_DISPLAY = {"EMBRAER RJ": "E170"}
+
+
+def _family_display(family: object) -> str:
+    fam = str(family) if family else "?"
+    return _FAMILY_DISPLAY.get(fam, fam)
+
 
 def _eng_sort_key(eid: str, family_map: dict[str, str]) -> tuple[int, str]:
     fam = str(family_map.get(eid) or "")
@@ -55,7 +63,7 @@ def _load_one(aircraft_type: str, sources: AircraftDataSources) -> AircraftBundl
         suffix = "" if row.engine_id in current_eids else " (off wing)"
         engine_labels[row.engine_id] = (
             f"{row.engine_id} — "
-            f"{row.aircraft_family or '?'} "
+            f"{_family_display(row.aircraft_family)} "
             f"{AIRCRAFT_REG.get(row.aircraft_id, row.aircraft_id)} "
             f"pos.{row.engine_position}{suffix}"
         )

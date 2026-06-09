@@ -69,7 +69,8 @@ class AnalysisState(rx.State):
     # Controls
     selected_parameter: str = "EGTHDM"
     selected_engine_ids: list[str] = []
-    available_engines_list: list[str] = []
+    available_engines_labeled: list[dict] = []  # [{"id", "label"}], across selected types
+    engine_search: str = ""
     smooth_window: int = 30
     pre_smooth_window: int = 15
     n_obs_mean: int = 15
@@ -94,9 +95,23 @@ class AnalysisState(rx.State):
     # Backend-only: cache of per-engine figures (not serialised to client)
     _figures_cache: dict = {}
 
+    # Backend-only: engine to auto-open on the next page load (set when the user
+    # clicks an event in the Wash Schedule gantt). Consumed by ``on_load``.
+    _pending_engine_id: str = ""
+
     @rx.var
     def parameter_options(self) -> list[str]:
         return _PARAM_CHOICES
+
+    @rx.var
+    def filtered_engines(self) -> list[dict]:
+        q = self.engine_search.strip().lower()
+        if not q:
+            return self.available_engines_labeled
+        return [
+            e for e in self.available_engines_labeled
+            if q in e["label"].lower() or q in e["id"].lower()
+        ]
 
     @rx.var
     def sorted_summary_rows(self) -> list[dict]:
@@ -127,6 +142,15 @@ class AnalysisState(rx.State):
             self.selected_engine_ids = [*self.selected_engine_ids, eid]
         elif not checked:
             self.selected_engine_ids = [e for e in self.selected_engine_ids if e != eid]
+
+    @rx.event
+    def set_engine_search(self, value: str):
+        self.engine_search = value
+
+    @rx.event
+    def select_all_engines(self):
+        ids = [e["id"] for e in self.filtered_engines]
+        self.selected_engine_ids = list(dict.fromkeys([*self.selected_engine_ids, *ids]))
 
     @rx.event
     def clear_engines(self):
@@ -160,17 +184,46 @@ class AnalysisState(rx.State):
         except (ValueError, TypeError):
             pass
 
+    def _load_engines(self, gs: GlobalState):
+        """Rebuild the engine list (engines with wash events across the selected
+        types), pruning any selection that's no longer available."""
+        labeled: list[dict] = []
+        seen: set[str] = set()
+        for ac_type in gs.aircraft_types:
+            bundle = LOADED.get(ac_type)
+            if bundle is None:
+                continue
+            engine_ids_wash = set(bundle.wash_maint["engine_id_str"].unique())
+            for eid in bundle.available_engines:
+                if eid in engine_ids_wash and eid not in seen:
+                    seen.add(eid)
+                    labeled.append({"id": eid, "label": bundle.engine_labels.get(eid, eid)})
+        self.available_engines_labeled = labeled
+        # Drop any prior selection that's no longer available under the new types.
+        self.selected_engine_ids = [e for e in self.selected_engine_ids if e in seen]
+        if labeled and not self.selected_engine_ids:
+            self.selected_engine_ids = [labeled[0]["id"]]
+
     @rx.event
     async def on_load(self):
         gs = await self.get_state(GlobalState)
-        bundle = LOADED.get(gs.aircraft_type)
-        if bundle is None:
-            return
-        engine_ids_wash = set(bundle.wash_maint["engine_id_str"].unique())
-        available = [e for e in bundle.available_engines if e in engine_ids_wash]
-        self.available_engines_list = available
-        if available and not self.selected_engine_ids:
-            self.selected_engine_ids = [available[0]]
+        self._load_engines(gs)
+        # If we arrived here from a click on the Wash Schedule gantt, select that
+        # engine (overriding _load_engines' default) and build its report. Done
+        # here rather than chained off the redirect so it always runs *after*
+        # _load_engines, which would otherwise clobber the selection.
+        if self._pending_engine_id:
+            eid = self._pending_engine_id
+            self._pending_engine_id = ""
+            if any(e["id"] == eid for e in self.available_engines_labeled):
+                self.selected_engine_ids = [eid]
+                yield AnalysisState.run_analysis
+
+    @rx.event
+    async def toggle_aircraft_type(self, ac_type: str, checked: bool):
+        gs = await self.get_state(GlobalState)
+        gs.apply_type_toggle(ac_type, checked)
+        self._load_engines(gs)
 
     @rx.event
     def select_engine_chart(self, engine_id: str):
@@ -187,10 +240,10 @@ class AnalysisState(rx.State):
         yield
 
         gs = await self.get_state(GlobalState)
-        bundle = LOADED.get(gs.aircraft_type)
+        bundles = [LOADED[t] for t in gs.aircraft_types if t in LOADED]
 
-        if bundle is None:
-            self.error_message = "No data loaded for this aircraft type."
+        if not bundles:
+            self.error_message = "No aircraft type selected."
             self.is_computing = False
             return
 
@@ -210,9 +263,18 @@ class AnalysisState(rx.State):
         start = _parse_date(gs.start_date)
         end = _parse_date(gs.end_date)
 
+        # Engines are disjoint across types; gather flights/maintenance from the
+        # bundle each selected engine actually belongs to, and merge labels.
+        selected = set(self.selected_engine_ids)
         flights = []
-        for eid in self.selected_engine_ids:
-            flights.extend(flights_for(bundle, eid, base_param, start=start, end=end))
+        maintenance = []
+        labels: dict[str, str] = {}
+        for bundle in bundles:
+            for eid in bundle.available_engines:
+                if eid in selected:
+                    flights.extend(flights_for(bundle, eid, base_param, start=start, end=end))
+                    maintenance.extend(maint_for(bundle, eid))
+                    labels[eid] = bundle.engine_labels.get(eid, eid)
 
         if not flights:
             self.error_message = (
@@ -220,10 +282,6 @@ class AnalysisState(rx.State):
             )
             self.is_computing = False
             return
-
-        maintenance = []
-        for eid in self.selected_engine_ids:
-            maintenance.extend(maint_for(bundle, eid))
 
         config = WashConfig(
             smooth_window=self.smooth_window,
@@ -248,7 +306,6 @@ class AnalysisState(rx.State):
         for m in plot.markers:
             markers_by_eng.setdefault(m.engine_id, []).append(m)
 
-        labels = bundle.engine_labels
         figures: dict[str, go.Figure] = {}
         for eid in self.selected_engine_ids:
             eng_markers = sorted(markers_by_eng.get(eid, []), key=lambda m: m.event_index)

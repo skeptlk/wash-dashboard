@@ -123,26 +123,38 @@ def _sortable_header(label: str, column: str) -> rx.Component:
 
 
 def _ranked_table() -> rx.Component:
-    return rx.box(
-        rx.table.root(
-            rx.table.header(
-                rx.table.row(
-                    _sortable_header("Engine", "label"),
-                    _sortable_header("°C / yr", "slope_per_year"),
-                    _sortable_header("r²", "r_squared"),
-                    _sortable_header("n", "n_points"),
-                    _sortable_header("Start", "start"),
-                    _sortable_header("End", "end"),
-                ),
-            ),
-            rx.table.body(
-                rx.foreach(DegradationState.sorted_ranked_rows, _ranked_table_row),
-            ),
-            variant="surface",
+    return rx.vstack(
+        rx.input(
+            placeholder="Search engine / aircraft…",
+            value=DegradationState.engine_search,
+            on_change=DegradationState.set_engine_search,
             size="2",
+            width="100%",
         ),
-        max_height="600px",
-        overflow_y="auto",
+        rx.box(
+            rx.table.root(
+                rx.table.header(
+                    rx.table.row(
+                        _sortable_header("Engine", "label"),
+                        _sortable_header("°C / yr", "slope_per_year"),
+                        _sortable_header("r²", "r_squared"),
+                        _sortable_header("n", "n_points"),
+                        _sortable_header("Start", "start"),
+                        _sortable_header("End", "end"),
+                    ),
+                ),
+                rx.table.body(
+                    rx.foreach(DegradationState.sorted_ranked_rows, _ranked_table_row),
+                ),
+                variant="surface",
+                size="2",
+            ),
+            max_height="600px",
+            overflow_y="auto",
+            width="100%",
+        ),
+        spacing="2",
+        align="stretch",
         width="100%",
     )
 

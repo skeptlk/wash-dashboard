@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import reflex as rx
 
-from ..components.plotly_sync import range_sync_plotly
-from ..components.selectors import aircraft_type_selector, date_range_picker
+from ..components.selectors import (
+    aircraft_type_selector,
+    date_range_picker,
+    filterable_checklist,
+)
 from ..components.shell import page_shell
 from ..state.schedule import ScheduleState
 
@@ -23,27 +26,19 @@ def _filter_section(label: str, *children: rx.Component) -> rx.Component:
 def _control_panel() -> rx.Component:
     return rx.vstack(
         rx.heading("Controls", size="4"),
-        aircraft_type_selector(),
+        aircraft_type_selector(on_toggle=ScheduleState.toggle_aircraft_type),
         date_range_picker(),
-        _filter_section(
-            "Aircraft",
-            rx.scroll_area(
-                rx.vstack(
-                    rx.foreach(
-                        ScheduleState.available_aircraft_regs,
-                        lambda reg: rx.checkbox(
-                            reg,
-                            checked=ScheduleState.selected_aircraft_regs.contains(reg),
-                            on_change=ScheduleState.set_aircraft_reg_checked(reg),
-                            size="1",
-                        ),
-                    ),
-                    spacing="1",
-                    align="start",
-                ),
-                max_height="200px",
-                width="100%",
-            ),
+        filterable_checklist(
+            title="Aircraft",
+            search_value=ScheduleState.aircraft_search,
+            on_search_change=ScheduleState.set_aircraft_search,
+            filtered_items=ScheduleState.filtered_aircraft,
+            selected_set=ScheduleState.selected_aircraft_regs,
+            on_item_check=ScheduleState.set_aircraft_reg_checked,
+            on_select_all=ScheduleState.select_all_aircraft,
+            on_clear=ScheduleState.clear_aircraft,
+            max_height="200px",
+            search_placeholder="Search registration…",
         ),
         _filter_section(
             "ATA code",
@@ -107,31 +102,14 @@ def _results_panel() -> rx.Component:
                         align="center",
                     ),
 
-                    range_sync_plotly(
-                        data=ScheduleState.nav_figure,
-                        on_relayout=ScheduleState.sync_time_window,
-                        # width="100%",
-                        # height="100px",
-                        # background_color="blue",
-                    ),
-                    # Tall per-engine chart in a scrollable area; the timeline
-                    # navigator below stays pinned so it's always reachable.
-                    rx.box(
-                        rx.plotly(
-                            data=ScheduleState.gantt_figure,
-                            on_click=ScheduleState.open_in_analysis,
-                            width="100%",
-                        ),
-                        overflow_y="auto",
-                        flex="1",
-                        min_height="0",
+                    rx.plotly(
+                        data=ScheduleState.gantt_figure,
+                        on_click=ScheduleState.open_in_analysis,
                         width="100%",
                     ),
                     spacing="2",
                     align="stretch",
                     width="100%",
-                    # height="calc(100vh)",
-                    # background_color="red",
                 ),
                 rx.callout(
                     rx.cond(

@@ -41,6 +41,15 @@ def _parse_date(s: str) -> Optional[datetime]:
         return None
 
 
+def _bundle_for_engine(aircraft_types: list[str], engine_id: str):
+    """Locate the bundle a given engine belongs to (engine sets are disjoint)."""
+    for ac_type in aircraft_types:
+        bundle = LOADED.get(ac_type)
+        if bundle is not None and engine_id in bundle.available_engines:
+            return bundle
+    return None
+
+
 def _sort_key(value):
     """Sort key that tolerates mixed/missing values within a column.
 
@@ -74,6 +83,7 @@ class DegradationState(rx.State):
 
     selected_parameter: str = "EGTHDM"
     selected_engine_id: str = ""
+    engine_search: str = ""
     normal_rate: float = -3.86
     is_computing: bool = False
     has_results: bool = False
@@ -95,10 +105,15 @@ class DegradationState(rx.State):
 
     @rx.var
     def sorted_ranked_rows(self) -> list[dict]:
+        q = self.engine_search.strip().lower()
+        rows = (
+            self.ranked_rows if not q
+            else [r for r in self.ranked_rows if q in str(r.get("label", "")).lower()]
+        )
         if not self.sort_column:
-            return self.ranked_rows
+            return rows
         return sorted(
-            self.ranked_rows,
+            rows,
             key=lambda r: _sort_key(r.get(self.sort_column)),
             reverse=not self.sort_ascending,
         )
@@ -110,6 +125,10 @@ class DegradationState(rx.State):
         else:
             self.sort_column = column
             self.sort_ascending = True
+
+    @rx.event
+    def set_engine_search(self, value: str):
+        self.engine_search = value
 
     @rx.event
     def set_selected_parameter(self, value: str):
@@ -128,8 +147,8 @@ class DegradationState(rx.State):
         yield
 
         gs = await self.get_state(GlobalState)
-        bundle = LOADED.get(gs.aircraft_type)
-        if bundle is None:
+        bundles = [LOADED[t] for t in gs.aircraft_types if t in LOADED]
+        if not bundles:
             self.is_computing = False
             self.has_results = False
             self.ranked_rows = []
@@ -140,14 +159,16 @@ class DegradationState(rx.State):
         end = _parse_date(gs.end_date)
 
         trends: list[LifetimeTrend] = []
-        for engine_id in bundle.available_engines:
-            flights = flights_for(bundle, engine_id, parameter, start=start, end=end)
-            if len(flights) < 2:
-                continue
-            trends.append(compute_lifetime_trend(flights, parameter))
+        labels: dict[str, str] = {}
+        for bundle in bundles:
+            labels.update(bundle.engine_labels)
+            for engine_id in bundle.available_engines:
+                flights = flights_for(bundle, engine_id, parameter, start=start, end=end)
+                if len(flights) < 2:
+                    continue
+                trends.append(compute_lifetime_trend(flights, parameter))
 
         ranked = rank_engines_by_trend(trends, parameter.trend_direction)
-        labels = bundle.engine_labels
         self.ranked_rows = [
             _trend_to_row(t, labels.get(t.engine_id, t.engine_id)) for t in ranked
         ]
@@ -157,13 +178,15 @@ class DegradationState(rx.State):
         # Auto-select the worst degrader so the user sees something immediately.
         if ranked:
             self.selected_engine_id = ranked[0].engine_id
-            self._update_chart(bundle, parameter, start, end)
+            bundle = _bundle_for_engine(gs.aircraft_types, self.selected_engine_id)
+            if bundle is not None:
+                self._update_chart(bundle, parameter, start, end)
 
     @rx.event
     async def select_engine(self, engine_id: str):
         self.selected_engine_id = engine_id
         gs = await self.get_state(GlobalState)
-        bundle = LOADED.get(gs.aircraft_type)
+        bundle = _bundle_for_engine(gs.aircraft_types, engine_id)
         if bundle is None:
             return
         parameter = PARAMETER_BY_NAME[self.selected_parameter]

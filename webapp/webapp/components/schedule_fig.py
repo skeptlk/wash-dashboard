@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from ..data.aircraft_registry import AIRCRAFT_REG
+from ..data.loader import _family_display
 
 UNINSTALLED = "— uninstalled —"
 
@@ -28,14 +29,28 @@ def _label_family_key(label: str) -> int:
         return 3
 
 
-def prepare_schedule(bundle) -> dict:
-    """Build the flat wash-event DataFrame and filter options for a bundle.
+def prepare_schedule(bundles) -> dict:
+    """Build the flat wash-event DataFrame and filter options for a set of types.
+
+    ``bundles`` is a list of AircraftBundle. Engine sets are disjoint across
+    types, while ``wash_maint``/``onwing_df`` come from a shared fleet-wide
+    source, so we take them from the first bundle and restrict to the union of
+    the selected types' engines — scoping the aircraft/ATA options to those types.
 
     Returns a dict with keys: df, ata_codes, aircraft_options, ata_color.
     """
-    wash_maint = bundle.wash_maint
-    onwing_df = bundle.onwing_df
-    engine_labels = bundle.engine_labels
+    if not bundles:
+        return {"df": pd.DataFrame(), "ata_codes": [], "aircraft_options": [], "ata_color": {}}
+
+    engine_set: set[str] = set()
+    engine_labels: dict[str, str] = {}
+    for b in bundles:
+        engine_set.update(b.available_engines)
+        engine_labels.update(b.engine_labels)
+
+    wash_maint = bundles[0].wash_maint
+    wash_maint = wash_maint[wash_maint["engine_id_str"].isin(engine_set)]
+    onwing_df = bundles[0].onwing_df
 
     ts = pd.to_datetime(wash_maint["maint_datetime"])
     if ts.dt.tz is not None:
@@ -64,7 +79,7 @@ def prepare_schedule(bundle) -> dict:
 
     fallback = df.apply(
         lambda r: (
-            f"{r['engine_id_str']} — {r['aircraft_family']} (uninstalled)"
+            f"{r['engine_id_str']} — {_family_display(r['aircraft_family'])} (uninstalled)"
             if pd.notna(r["aircraft_family"])
             else r["engine_id_str"]
         ),
@@ -129,12 +144,11 @@ def build_main_figure(
     df: pd.DataFrame,
     ata_color: dict,
     eng_order: list[str],
-    x_range: Optional[list] = None,
 ) -> go.Figure:
-    """Tall per-engine chart (no rangeslider) — meant for a scrollable container.
+    """Per-engine Gantt chart with Plotly's built-in rangeslider.
 
-    Its height grows with the engine count so every row stays readable; the time
-    window is controlled externally via ``x_range`` (set from the navigator).
+    Its height grows with the engine count so every row stays readable; the
+    time window is controlled by the default rangeslider at the bottom.
     """
     fig = go.Figure()
 
@@ -187,10 +201,8 @@ def build_main_figure(
         "ticklen": 6,
         "tickcolor": _GRID,
         "tickfont": {"family": _FONT, "size": 11},
+        "rangeslider": {"visible": True, "thickness": 0.06},
     }
-    if x_range:
-        xaxis["range"] = x_range
-        xaxis["autorange"] = False
     fig.update_layout(
         yaxis={
             "categoryorder": "array",
@@ -212,64 +224,6 @@ def build_main_figure(
     return fig
 
 
-
-def build_nav_figure(df: pd.DataFrame, ata_color: dict) -> go.Figure:
-    """The timeline scrubber: a compact plain rangeslider + quick-range buttons.
-
-    Deliberately *not* a chart — a single invisible trace defines the date
-    extent so the slider spans all events, and the area above it is left blank
-    (no duplicate "mini chart"). The quick-range buttons and an ATA colour
-    legend sit in the top margin. Dragging the slider (or a button) pans/zooms
-    the tall main chart via ``on_relayout`` → ``sync_time_window``.
-    """
-    xs = df["maint_datetime"]
-    x0, x1 = xs.min(), xs.max()
-
-    fig = go.Figure()
-    # Invisible trace: only there to give the rangeslider its full date extent.
-    fig.add_trace(go.Scatter(
-        x=[x0, x1], y=[0, 0], mode="markers",
-        marker={"opacity": 0}, hoverinfo="skip", showlegend=False,
-    ))
-    # Legend-only swatches (no data) so ATA colours stay documented without
-    # drawing anything in the slider.
-    for ata in sorted(df["ata_code"].unique()):
-        fig.add_trace(go.Scatter(
-            x=[None], y=[None], mode="markers",
-            marker={"size": 9, "color": ata_color.get(ata, "#888")},
-            name=f"ATA {ata}",
-        ))
-
-    fig.update_layout(
-        yaxis={"visible": False, "fixedrange": True, "range": [-1, 1]},
-        xaxis={
-            "title": "",
-            "type": "date",
-            "showline": False,
-            "zeroline": False,
-            "rangeslider": {
-                "visible": True,
-                "thickness": 1.0,
-                "borderwidth": 1,
-                "autorange": True,
-            },
-        },
-        height=110,
-        margin={"t": 0, "r": 0, "b": 0, "l": 0},
-        hovermode=False,
-        legend={
-            "orientation": "h",
-            "y": 1.0,
-            "x": 1,
-            "xanchor": "right",
-            "yanchor": "bottom",
-            "title": "",
-            "font": {"family": _FONT, "size": 12},
-        },
-    )
-    return fig
-
-
 def build_schedule_figures(
     df: pd.DataFrame,
     ata_color: dict,
@@ -277,13 +231,13 @@ def build_schedule_figures(
     ata_filter: Optional[list[str]] = None,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
-) -> tuple[go.Figure, go.Figure, int]:
-    """Filter and build (main_figure, nav_figure, n_events)."""
+) -> tuple[go.Figure, int]:
+    """Filter and build (main_figure, n_events)."""
     df = _filter_df(df, aircraft_filter, ata_filter, start, end)
     if df.empty:
         empty = go.Figure()
         empty.update_layout(title="No events match the filters.", height=300)
-        return empty, go.Figure(), 0
+        return empty, 0
 
     eng_order = _engine_order(df)
-    return build_main_figure(df, ata_color, eng_order), build_nav_figure(df, ata_color), len(df)
+    return build_main_figure(df, ata_color, eng_order), len(df)
