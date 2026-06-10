@@ -1,4 +1,4 @@
-"""State for the Long-Term Degradation page."""
+"""State for the Degradation page."""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ def _trend_to_row(t: LifetimeTrend, label: str) -> dict:
 
 
 class DegradationState(rx.State):
-    """Per-page state for the Long-Term Degradation view."""
+    """Per-page state for the Degradation view."""
 
     selected_parameter: str = "EGTHDM"
     selected_engine_id: str = ""

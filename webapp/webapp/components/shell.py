@@ -8,9 +8,10 @@ from ..state.auth import AuthState
 
 
 _NAV_ITEMS = [
-    ("Long-Term Degradation", "/", "trending-down"),
+    ("Degradation", "/", "trending-down"),
     ("Wash Analysis", "/analysis", "droplets"),
     ("Wash Schedule", "/schedule", "calendar"),
+    ("EGT Indication", "/egt", "thermometer"),
 ]
 
 

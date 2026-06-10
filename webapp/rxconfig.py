@@ -14,6 +14,7 @@ _kwargs = {
     "plugins": [
         rx.plugins.SitemapPlugin(),
         rx.plugins.TailwindV4Plugin(),
+        rx.plugins.RadixThemesPlugin(theme=rx.theme(accent_color="blue", radius="medium")),
     ],
 }
 if _API_URL:

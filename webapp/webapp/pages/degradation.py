@@ -1,4 +1,4 @@
-"""Long-Term Degradation page — `/`."""
+"""Degradation page — `/`."""
 
 from __future__ import annotations
 

@@ -13,9 +13,7 @@ from .state.auth import AuthState
 from .state.schedule import ScheduleState
 
 
-app = rx.App(
-    theme=rx.theme(accent_color="blue", radius="medium"),
-)
+app = rx.App()
 app.add_page(
     login_page,
     route="/login",
