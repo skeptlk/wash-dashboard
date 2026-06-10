@@ -288,7 +288,7 @@ class TestUtilizationIntegration:
         )
 
         calc = WashCalculator(WashConfig(smooth_window=3, n_obs_mean=3))
-        summaries = calc.process(flights, maint, _loe_param(), utilization=utilization)
+        summaries = calc.process(flights, maint, _loe_param(), utilizations=utilization)
 
         assert len(summaries) == 1
         ev = summaries[0].results[0]
@@ -330,7 +330,7 @@ class TestUtilizationIntegration:
         )
 
         calc = WashCalculator(WashConfig(smooth_window=3, n_obs_mean=3))
-        summaries = calc.process(flights, maint, _loe_param(), utilization=utilization)
+        summaries = calc.process(flights, maint, _loe_param(), utilizations=utilization)
 
         ev = summaries[0].results[0]
         assert ev.cycles_loss_of_efficiency is None
@@ -350,7 +350,7 @@ class TestUtilizationIntegration:
 
         calc = WashCalculator(WashConfig(smooth_window=3, n_obs_mean=3))
         summaries = calc.process_all(
-            flights, maint, parameters=[_loe_param()], utilization=utilization,
+            flights, maint, parameters=[_loe_param()], utilizations=utilization,
         )
 
         assert len(summaries) == 1

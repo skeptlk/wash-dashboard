@@ -12,7 +12,7 @@ from enginewash import WashCalculator, WashConfig, WashParameter
 
 from ..components.analysis_fig import build_analysis_chart, build_violin_figure
 from ..data import LOADED
-from ..data.derived import PARAMETER_BY_NAME, flights_for, maint_for
+from ..data.derived import PARAMETER_BY_NAME, flights_for, maint_for, utilization_for
 from .base import GlobalState
 
 
@@ -60,6 +60,8 @@ def _event_to_row(ev, label: str) -> dict:
             if ev.time_loss_of_efficiency else "—"
         ),
         "loe_days": ev.days_loss_of_efficiency if ev.days_loss_of_efficiency is not None else "—",
+        "loe_cycles": ev.cycles_loss_of_efficiency if ev.cycles_loss_of_efficiency is not None else "—",
+        "loe_hours": ev.hours_loss_of_efficiency if ev.hours_loss_of_efficiency is not None else "—",
     }
 
 
@@ -268,13 +270,17 @@ class AnalysisState(rx.State):
         selected = set(self.selected_engine_ids)
         flights = []
         maintenance = []
+        utilizations = []
         labels: dict[str, str] = {}
         for bundle in bundles:
+            bundle_engines = set()
             for eid in bundle.available_engines:
                 if eid in selected:
+                    bundle_engines.add(eid)
                     flights.extend(flights_for(bundle, eid, base_param, start=start, end=end))
                     maintenance.extend(maint_for(bundle, eid))
                     labels[eid] = bundle.engine_labels.get(eid, eid)
+            utilizations.extend(utilization_for(bundle, bundle_engines))
 
         if not flights:
             self.error_message = (
@@ -289,7 +295,12 @@ class AnalysisState(rx.State):
             n_obs_mean=self.n_obs_mean,
         )
         calc = WashCalculator(config=config)
-        summaries = calc.process(flights=flights, maintenances=maintenance, parameter=calc_param)
+        summaries = calc.process(
+            flights=flights,
+            maintenances=maintenance,
+            parameter=calc_param,
+            utilizations=utilizations,
+        )
         plot = calc.build_plot(flights=flights, maintenances=maintenance, parameter=calc_param)
 
         all_events = [ev for s in summaries for ev in s.results]

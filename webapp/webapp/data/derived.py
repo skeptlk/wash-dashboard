@@ -7,7 +7,15 @@ from typing import Optional
 
 import pandas as pd
 
-from enginewash import DEGT, EGTHDM, GWFM, FlightRecord, MaintenanceRecord, WashParameter
+from enginewash import (
+    DEGT,
+    EGTHDM,
+    GWFM,
+    FlightRecord,
+    MaintenanceRecord,
+    UtilizationRecord,
+    WashParameter,
+)
 
 from .loader import AircraftBundle
 
@@ -58,8 +66,41 @@ def flights_for(
     ]
 
 
+def utilization_for(
+    bundle: AircraftBundle, engine_ids: set[str]
+) -> list[UtilizationRecord]:
+    """Build UtilizationRecords for the given engines in a single pass.
+
+    Returns an empty list when the bundle has no utilization data. Cycles/hours
+    are already cumulative in the source (total_cycles / total_hours, the latter
+    converted from minutes during load).
+    """
+    df = bundle.utilization_df
+    if df.empty or not engine_ids:
+        return []
+    sub = df.loc[
+        df["engine_id"].isin(engine_ids),
+        ["engine_id", "total_cycles", "total_hours", "departure_datetime", "arrival_datetime"],
+    ]
+    return [
+        UtilizationRecord(
+            engine_id=row.engine_id,
+            total_cycles=int(row.total_cycles),
+            total_hours=float(row.total_hours),
+            departure_datetime=row.departure_datetime.to_pydatetime()
+            if hasattr(row.departure_datetime, "to_pydatetime")
+            else row.departure_datetime,
+            arrival_datetime=row.arrival_datetime.to_pydatetime()
+            if hasattr(row.arrival_datetime, "to_pydatetime")
+            else row.arrival_datetime,
+        )
+        for row in sub.itertuples(index=False)
+    ]
+
+
 def maint_for(bundle: AircraftBundle, engine_id: str) -> list[MaintenanceRecord]:
-    """Build a list of MaintenanceRecord for one engine from wash_maint."""
+    """Build a list of MaintenanceRecord for one engine from wash_maint.
+    """
     df = bundle.wash_maint
     sub = df.loc[df["engine_id_str"] == engine_id, ["maint_datetime", "ata_code"]]
     return [
@@ -71,4 +112,5 @@ def maint_for(bundle: AircraftBundle, engine_id: str) -> list[MaintenanceRecord]
             ata_code=str(row.ata_code) if pd.notna(row.ata_code) else None,
         )
         for row in sub.itertuples(index=False)
+        if pd.notna(row.maint_datetime)
     ]

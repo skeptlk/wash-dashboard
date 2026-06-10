@@ -24,6 +24,7 @@ class AircraftBundle:
     maintenance_df: pd.DataFrame
     takeoff_df: pd.DataFrame
     cruise_df: pd.DataFrame
+    utilization_df: pd.DataFrame
     wash_maint: pd.DataFrame
     engine_labels: dict[str, str]
     engine_family_map: dict[str, str]
@@ -46,6 +47,25 @@ def _family_display(family: object) -> str:
 def _eng_sort_key(eid: str, family_map: dict[str, str]) -> tuple[int, str]:
     fam = str(family_map.get(eid) or "")
     return (_AC_FAMILY_ORDER.get(fam[:1].upper() if fam else "", 3), eid)
+
+
+# The utilization file is shared across aircraft types; load it once and hand the
+# same frame to every bundle rather than re-downloading ~1.3M rows per type.
+_UTILIZATION_CACHE: dict[str, pd.DataFrame] = {}
+
+
+def _load_utilization(url: str) -> pd.DataFrame:
+    cached = _UTILIZATION_CACHE.get(url)
+    if cached is not None:
+        return cached
+    df = pd.read_parquet(url)
+    df = df.dropna(subset=["engine_id", "arrival_datetime", "departure_datetime"]).copy()
+    df["engine_id"] = df["engine_id"].astype(int).astype(str)
+    # tah is cumulative minutes in the source; the enginewash library expects hours.
+    df["total_hours"] = df["tah"] / 60.0
+    df["total_cycles"] = df["tac"].astype(int)
+    _UTILIZATION_CACHE[url] = df
+    return df
 
 
 def _load_one(aircraft_type: str, sources: AircraftDataSources) -> AircraftBundle:
@@ -77,6 +97,12 @@ def _load_one(aircraft_type: str, sources: AircraftDataSources) -> AircraftBundl
         maintenance_df["ata_code"].astype(str).str.match(r"^3[34]\d$")
     ].copy()
     wash_maint["engine_id_str"] = wash_maint["engine_id"].astype(str)
+    # maint_datetime arrives as tz-aware strings (e.g. '2024-02-10 03:00:00.000 +0300');
+    # normalize once to tz-naive local wall-clock to match the tz-naive flight timestamps.
+    md = pd.to_datetime(wash_maint["maint_datetime"], errors="coerce")
+    if md.dt.tz is not None:
+        md = md.dt.tz_localize(None)
+    wash_maint["maint_datetime"] = md
 
     takeoff_df = pd.read_parquet(sources["takeoff"])
     takeoff_df = takeoff_df.dropna(subset=["engine_id", "flight_datetime"]).copy()
@@ -89,6 +115,14 @@ def _load_one(aircraft_type: str, sources: AircraftDataSources) -> AircraftBundl
         cruise_df["engine_id"] = cruise_df["engine_id"].astype(int).astype(str)
     else:
         cruise_df = pd.DataFrame(columns=["engine_id", "flight_datetime", "gwfm", "degt"])
+
+    util_url = sources.get("utilization")
+    if util_url:
+        utilization_df = _load_utilization(util_url)
+    else:
+        utilization_df = pd.DataFrame(
+            columns=["engine_id", "arrival_datetime", "departure_datetime", "total_cycles", "total_hours"]
+        )
 
     date_min = takeoff_df["flight_datetime"].min()
     date_max = takeoff_df["flight_datetime"].max()
@@ -110,6 +144,7 @@ def _load_one(aircraft_type: str, sources: AircraftDataSources) -> AircraftBundl
         maintenance_df=maintenance_df,
         takeoff_df=takeoff_df,
         cruise_df=cruise_df,
+        utilization_df=utilization_df,
         wash_maint=wash_maint,
         engine_labels=engine_labels,
         engine_family_map=engine_family_map,
