@@ -18,6 +18,8 @@ def compute_wash_means(
     after_segment: np.ndarray,
     n_obs: int,
     direction: int,
+    before_mode: str = "worst",
+    after_mode: str = "best",
 ) -> tuple[float, float, float]:
     """Compute before-wash and after-wash reference values.
 
@@ -26,6 +28,10 @@ def compute_wash_means(
         after_segment: Smoothed values from start of current segment.
         n_obs: Number of observations to consider.
         direction: +1 (higher=better) or -1 (lower=better).
+        before_mode: "worst" picks the extremum (per direction) within the last
+            n_obs points; "last" picks the last valid point before the wash.
+        after_mode: "best" picks the extremum (per direction) within the first
+            n_obs points; "first" picks the first valid point after the wash.
 
     Returns:
         Tuple of (mean_before, mean_after, delta).
@@ -39,11 +45,18 @@ def compute_wash_means(
     if len(tail_valid) == 0 or len(head_valid) == 0:
         return np.nan, np.nan, np.nan
 
-    if direction == -1:
+    if before_mode == "last":
+        mean_before = float(tail_valid[-1])
+    elif direction == -1:
         mean_before = float(np.max(tail_valid))
-        mean_after = float(np.min(head_valid))
     else:
         mean_before = float(np.min(tail_valid))
+
+    if after_mode == "first":
+        mean_after = float(head_valid[0])
+    elif direction == -1:
+        mean_after = float(np.min(head_valid))
+    else:
         mean_after = float(np.max(head_valid))
 
     delta = mean_after - mean_before

@@ -285,7 +285,12 @@ class WashCalculator:
             curr_times = time_values[curr_idx]
 
             mean_before, mean_after, delta = compute_wash_means(
-                prev_smooth, curr_smooth, self.config.n_obs_mean, cart
+                prev_smooth,
+                curr_smooth,
+                self.config.n_obs_mean,
+                cart,
+                self.config.before_wash_mode,
+                self.config.after_wash_mode,
             )
 
             time_loe = detect_loss_of_efficiency(

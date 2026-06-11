@@ -138,12 +138,20 @@ class WashConfig:
         pre_smooth_window: Window for initial smoothing of raw values when
             pre-smoothed data (float_value_smooth) is not provided.
         n_obs_mean: Number of observations for before/after wash mean.
+        before_wash_mode: How to pick mean_before within the pre-wash window.
+            "worst" selects the worst smoothed value (extremum, per trend
+            direction); "last" selects the last smoothed point before the wash.
+        after_wash_mode: How to pick mean_after within the post-wash window.
+            "best" selects the best smoothed value (extremum, per trend
+            direction); "first" selects the first smoothed point after the wash.
         parameters: List of parameters to analyze.
     """
 
     smooth_window: int = 30
     pre_smooth_window: int = 15
     n_obs_mean: int = 15
+    before_wash_mode: str = "worst"
+    after_wash_mode: str = "best"
     parameters: list[WashParameter] = field(default_factory=lambda: list(DEFAULT_PARAMETERS))
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import plotly.graph_objects as go
@@ -44,6 +44,32 @@ def _sort_key(value):
     return (0, str(value).lower())
 
 
+def _event_zoom_range(m) -> list[str]:
+    """ISO ``[x0, x1]`` window centred on the wash date, sized to fit the
+    pre/post segments and loss-of-efficiency marker for this event."""
+    wash_t = m.wash_event_point.flight_datetime
+    lefts = [wash_t]
+    rights = [wash_t]
+    if m.before_segment is not None:
+        lefts.append(m.before_segment.start_datetime)
+    if m.before_value_point is not None:
+        lefts.append(m.before_value_point.flight_datetime)
+    if m.after_segment is not None:
+        rights.append(m.after_segment.end_datetime)
+    if m.after_value_point is not None:
+        rights.append(m.after_value_point.flight_datetime)
+    if m.loss_of_efficiency_point is not None:
+        rights.append(m.loss_of_efficiency_point.flight_datetime)
+
+    half = max(wash_t - min(lefts), max(rights) - wash_t)
+    if half <= timedelta(0):
+        half = timedelta(days=60)
+    pad = half * 0.25
+    x0 = wash_t - half - pad
+    x1 = wash_t + half + pad
+    return [x0.isoformat(), x1.isoformat()]
+
+
 def _event_to_row(ev, label: str) -> dict:
     return {
         "engine_id": ev.engine_id,
@@ -76,6 +102,8 @@ class AnalysisState(rx.State):
     smooth_window: int = 30
     pre_smooth_window: int = 15
     n_obs_mean: int = 15
+    before_wash_mode: str = "worst"
+    after_wash_mode: str = "best"
     loe_threshold: float = 2.0
 
     # UI state
@@ -83,6 +111,9 @@ class AnalysisState(rx.State):
     has_results: bool = False
     error_message: str = ""
     active_engine_id: str = ""
+    # Key ("<engine_id>:<event_index>") of the wash row currently selected in the
+    # summary table — drives the row highlight and the chart zoom.
+    selected_event_key: str = ""
     n_events: int = 0
 
     # Click-to-sort: dict key of the active column, and direction.
@@ -96,6 +127,9 @@ class AnalysisState(rx.State):
 
     # Backend-only: cache of per-engine figures (not serialised to client)
     _figures_cache: dict = {}
+
+    # Backend-only: zoom x-range per wash event, keyed by "<engine_id>:<event_index>".
+    _event_ranges: dict = {}
 
     # Backend-only: engine to auto-open on the next page load (set when the user
     # clicks an event in the Wash Schedule gantt). Consumed by ``on_load``.
@@ -180,6 +214,14 @@ class AnalysisState(rx.State):
             pass
 
     @rx.event
+    def set_before_wash_mode(self, value: str):
+        self.before_wash_mode = value
+
+    @rx.event
+    def set_after_wash_mode(self, value: str):
+        self.after_wash_mode = value
+
+    @rx.event
     def set_loe_threshold(self, value: str):
         try:
             self.loe_threshold = float(value)
@@ -228,11 +270,19 @@ class AnalysisState(rx.State):
         self._load_engines(gs)
 
     @rx.event
-    def select_engine_chart(self, engine_id: str):
+    def select_event(self, engine_id: str, event_index: int):
+        """Show the clicked engine's chart, zoomed and centred on the clicked wash."""
         fig = self._figures_cache.get(engine_id)
-        if fig is not None:
-            self.active_engine_id = engine_id
-            self.chart_figure = fig
+        if fig is None:
+            return
+        self.active_engine_id = engine_id
+        self.selected_event_key = f"{engine_id}:{event_index}"
+        rng = self._event_ranges.get(self.selected_event_key)
+        if rng is not None:
+            fig.update_xaxes(range=rng, autorange=False)
+        else:
+            fig.update_xaxes(autorange=True)
+        self.chart_figure = fig
 
     @rx.event
     async def run_analysis(self):
@@ -293,6 +343,8 @@ class AnalysisState(rx.State):
             smooth_window=self.smooth_window,
             pre_smooth_window=self.pre_smooth_window,
             n_obs_mean=self.n_obs_mean,
+            before_wash_mode=self.before_wash_mode,
+            after_wash_mode=self.after_wash_mode,
         )
         calc = WashCalculator(config=config)
         summaries = calc.process(
@@ -318,6 +370,7 @@ class AnalysisState(rx.State):
             markers_by_eng.setdefault(m.engine_id, []).append(m)
 
         figures: dict[str, go.Figure] = {}
+        event_ranges: dict[str, list[str]] = {}
         for eid in self.selected_engine_ids:
             eng_markers = sorted(markers_by_eng.get(eid, []), key=lambda m: m.event_index)
             if not eng_markers:
@@ -329,6 +382,8 @@ class AnalysisState(rx.State):
                 eng_markers,
                 calc_param,
             )
+            for m in eng_markers:
+                event_ranges[f"{eid}:{m.event_index}"] = _event_zoom_range(m)
 
         if not figures:
             self.error_message = "No wash events found for the selected engines."
@@ -336,6 +391,8 @@ class AnalysisState(rx.State):
             return
 
         self._figures_cache = figures
+        self._event_ranges = event_ranges
+        self.selected_event_key = ""
 
         # Summary table rows (sorted by engine, then event index)
         engine_ids_with_events = {str(ev.engine_id) for ev in all_events}

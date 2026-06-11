@@ -31,6 +31,22 @@ def _num_input(label: str, value: rx.Var, on_change, min_val: int = 1) -> rx.Com
     )
 
 
+def _mode_select(label: str, options: list[str], value: rx.Var, on_change) -> rx.Component:
+    return rx.vstack(
+        rx.text(label, size="1", color="var(--gray-11)"),
+        rx.select(
+            options,
+            value=value,
+            on_change=on_change,
+            size="1",
+            width="100%",
+        ),
+        spacing="1",
+        align="stretch",
+        width="100%",
+    )
+
+
 def _control_panel() -> rx.Component:
     return rx.vstack(
         rx.heading("Controls", size="4"),
@@ -88,6 +104,23 @@ def _control_panel() -> rx.Component:
             spacing="2",
             width="100%",
         ),
+        rx.grid(
+            _mode_select(
+                "Before wash",
+                ["worst", "last"],
+                AnalysisState.before_wash_mode,
+                AnalysisState.set_before_wash_mode,
+            ),
+            _mode_select(
+                "After wash",
+                ["best", "first"],
+                AnalysisState.after_wash_mode,
+                AnalysisState.set_after_wash_mode,
+            ),
+            columns="2",
+            spacing="2",
+            width="100%",
+        ),
         # Run button
         rx.button(
             rx.cond(
@@ -116,6 +149,8 @@ def _delta_color(row: rx.Var) -> rx.Var:
 
 
 def _summary_row(row: rx.Var) -> rx.Component:
+    row_key = row["engine_id"].to_string() + ":" + row["event_index"].to_string()
+    is_selected = AnalysisState.selected_event_key == row_key
     return rx.table.row(
         rx.table.cell(row["engine_label"], max_width="200px", overflow="hidden", text_overflow="ellipsis", white_space="nowrap"),
         rx.table.cell(row["event_index"]),
@@ -128,9 +163,10 @@ def _summary_row(row: rx.Var) -> rx.Component:
         rx.table.cell(row["loe_days"]),
         rx.table.cell(row["loe_cycles"]),
         rx.table.cell(row["loe_hours"]),
-        on_click=AnalysisState.select_engine_chart(row["engine_id"]),
+        on_click=AnalysisState.select_event(row["engine_id"], row["event_index"]),
         cursor="pointer",
-        _hover={"background_color": "var(--gray-3)"},
+        background_color=rx.cond(is_selected, "var(--blue-4)", "transparent"),
+        _hover={"background_color": rx.cond(is_selected, "var(--blue-5)", "var(--gray-3)")},
     )
 
 
