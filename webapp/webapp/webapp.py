@@ -8,10 +8,11 @@ from .pages.analysis import analysis_page
 from .pages.degradation import degradation_page
 from .pages.login import login_page
 from .pages.schedule import schedule_page
+from .pages.egt import egt_page
 from .state.analysis import AnalysisState
 from .state.auth import AuthState
+from .state.egt import EgtState
 from .state.schedule import ScheduleState
-
 
 app = rx.App()
 app.add_page(
@@ -37,4 +38,10 @@ app.add_page(
     route="/schedule",
     title="ECM — Wash Schedule",
     on_load=[AuthState.require_auth, ScheduleState.on_load],
+)
+app.add_page(
+    egt_page,
+    route="/egt",
+    title="ECM — EGT Indication",
+    on_load=[AuthState.require_auth, EgtState.on_load],
 )

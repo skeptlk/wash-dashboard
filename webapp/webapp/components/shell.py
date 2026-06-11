@@ -11,7 +11,7 @@ _NAV_ITEMS = [
     ("Degradation", "/", "trending-down"),
     ("Wash Analysis", "/analysis", "droplets"),
     ("Wash Schedule", "/schedule", "calendar"),
-    ("EGT Indication", "/egt", "thermometer"),
+    ("EGT Indication", "/egt", "thermometer_sun"),
 ]
 
 
