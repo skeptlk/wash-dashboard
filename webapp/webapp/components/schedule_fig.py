@@ -49,7 +49,7 @@ def prepare_schedule(bundles) -> dict:
         engine_labels.update(b.engine_labels)
 
     wash_maint = bundles[0].wash_maint
-    wash_maint = wash_maint[wash_maint["engine_id_str"].isin(engine_set)]
+    wash_maint = wash_maint[wash_maint["engine_id"].isin(engine_set)]
     onwing_df = bundles[0].onwing_df
 
     ts = pd.to_datetime(wash_maint["maint_datetime"])
@@ -66,26 +66,26 @@ def prepare_schedule(bundles) -> dict:
     )
 
     df = pd.DataFrame({
-        "engine_id_str": wash_maint["engine_id_str"].values,
+        "engine_id": wash_maint["engine_id"].values,
         "maint_datetime": ts.values,
         "ata_code": wash_maint["ata_code"].astype(str).values,
     })
-    df["aircraft_id"] = df["engine_id_str"].map(engine_to_aircraft["aircraft_id"])
-    df["engine_position"] = df["engine_id_str"].map(engine_to_aircraft["engine_position"])
-    df["aircraft_family"] = df["engine_id_str"].map(engine_family)
+    df["aircraft_id"] = df["engine_id"].map(engine_to_aircraft["aircraft_id"])
+    df["engine_position"] = df["engine_id"].map(engine_to_aircraft["engine_position"])
+    df["aircraft_family"] = df["engine_id"].map(engine_family)
     df["aircraft_reg"] = (
         df["aircraft_id"].map(AIRCRAFT_REG).fillna(df["aircraft_id"])
     ).fillna(UNINSTALLED)
 
     fallback = df.apply(
         lambda r: (
-            f"{r['engine_id_str']} — {_family_display(r['aircraft_family'])} (uninstalled)"
+            f"{r['engine_id']} — {_family_display(r['aircraft_family'])} (uninstalled)"
             if pd.notna(r["aircraft_family"])
-            else r["engine_id_str"]
+            else r["engine_id"]
         ),
         axis=1,
     )
-    df["engine_label"] = df["engine_id_str"].map(engine_labels).fillna(fallback)
+    df["engine_label"] = df["engine_id"].map(engine_labels).fillna(fallback)
 
     ata_codes = sorted(df["ata_code"].unique())
     regs = sorted(r for r in df["aircraft_reg"].unique() if r != UNINSTALLED)
@@ -126,14 +126,14 @@ def _filter_df(
 
 def _engine_order(df: pd.DataFrame) -> list[str]:
     return (
-        df.drop_duplicates("engine_id_str")
+        df.drop_duplicates("engine_id")
         .assign(
             _sort_family=lambda d: d["engine_label"].map(_label_family_key),
             _sort_reg=lambda d: d["aircraft_reg"].fillna("zzz"),
             _sort_pos=lambda d: d["engine_position"].fillna(99),
         )
         .sort_values(
-            ["_sort_family", "_sort_reg", "_sort_pos", "engine_id_str"],
+            ["_sort_family", "_sort_reg", "_sort_pos", "engine_id"],
             ascending=[False, True, True, True],
         )["engine_label"]
         .tolist()
@@ -157,7 +157,7 @@ def build_main_figure(
         if len(grp) < 2:
             continue
         grp = grp.sort_values("maint_datetime")
-        eid = grp["engine_id_str"].iloc[0]
+        eid = grp["engine_id"].iloc[0]
         fig.add_trace(go.Scatter(
             x=grp["maint_datetime"],
             y=[eng_label] * len(grp),
@@ -182,7 +182,7 @@ def build_main_figure(
                 "opacity": 0.95,
             },
             name=f"ATA {ata}",
-            customdata=sub["engine_id_str"].tolist(),
+            customdata=sub["engine_id"].tolist(),
             hovertemplate="<b>%{y}</b><br>%{x|%Y-%m-%d}<br>ATA " + ata + "<extra></extra>",
         ))
 

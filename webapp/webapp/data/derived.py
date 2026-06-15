@@ -102,7 +102,7 @@ def maint_for(bundle: AircraftBundle, engine_id: str) -> list[MaintenanceRecord]
     """Build a list of MaintenanceRecord for one engine from wash_maint.
     """
     df = bundle.wash_maint
-    sub = df.loc[df["engine_id_str"] == engine_id, ["maint_datetime", "ata_code"]]
+    sub = df.loc[df["engine_id"] == engine_id, ["maint_datetime", "ata_code"]]
     return [
         MaintenanceRecord(
             engine_id=engine_id,

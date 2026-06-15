@@ -246,7 +246,7 @@ def _results_panel() -> rx.Component:
                         rx.divider(),
                         _summary_table(),
                         rx.divider(),
-                        rx.plotly(data=AnalysisState.violin_figure, width="100%", height="280px"),
+                        rx.plotly(data=AnalysisState.violin_figure, width="100%", height="420px"),
                         spacing="4",
                         align="stretch",
                         width="100%",

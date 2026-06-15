@@ -237,7 +237,7 @@ class AnalysisState(rx.State):
             bundle = LOADED.get(ac_type)
             if bundle is None:
                 continue
-            engine_ids_wash = set(bundle.wash_maint["engine_id_str"].unique())
+            engine_ids_wash = set(bundle.wash_maint["engine_id"].unique())
             for eid in bundle.available_engines:
                 if eid in engine_ids_wash and eid not in seen:
                     seen.add(eid)

@@ -38,7 +38,7 @@ class ScheduleState(rx.State):
     has_results: bool = False
     summary_text: str = ""
 
-    # Backend-only: gantt y-axis label → engine_id_str, for click-to-navigate.
+    # Backend-only: gantt y-axis label → engine_id, for click-to-navigate.
     _label_to_engine: dict[str, str] = {}
 
     @rx.var
@@ -118,7 +118,7 @@ class ScheduleState(rx.State):
         ata_set = set(prepared["ata_codes"])
         self.selected_ata_codes = [c for c in self.selected_ata_codes if c in ata_set]
         sdf = prepared["df"]
-        self._label_to_engine = dict(zip(sdf["engine_label"], sdf["engine_id_str"]))
+        self._label_to_engine = dict(zip(sdf["engine_label"], sdf["engine_id"]))
 
         main_fig, n_events = build_schedule_figures(
             prepared["df"],

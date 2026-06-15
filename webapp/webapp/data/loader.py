@@ -93,10 +93,15 @@ def _load_one(aircraft_type: str, sources: AircraftDataSources) -> AircraftBundl
     )
 
     maintenance_df = pd.read_parquet(sources["maintenance"])
-    wash_maint = maintenance_df[
-        maintenance_df["ata_code"].astype(str).str.match(r"^3[34]\d$")
-    ].copy()
-    wash_maint["engine_id_str"] = wash_maint["engine_id"].astype(str)
+    _ata = pd.to_numeric(maintenance_df["ata_code"], errors="coerce")
+    wash_mask = (
+        (
+            ((_ata >= 330) & (_ata <= 349)) |
+            ((_ata >= 206) & (_ata <= 210))
+        ) & (~maintenance_df["deleted"])
+    )
+    wash_maint = maintenance_df[wash_mask].copy()
+
     # maint_datetime arrives as tz-aware strings (e.g. '2024-02-10 03:00:00.000 +0300');
     # normalize once to tz-naive local wall-clock to match the tz-naive flight timestamps.
     md = pd.to_datetime(wash_maint["maint_datetime"], errors="coerce")

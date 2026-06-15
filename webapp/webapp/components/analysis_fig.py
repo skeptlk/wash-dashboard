@@ -179,6 +179,6 @@ def build_violin_figure(events: list[WashEvent], param: WashParameter) -> go.Fig
         yaxis_title=f"Δ {param.name}",
         showlegend=False,
         margin={"t": 36, "r": 8, "b": 36, "l": 48},
-        height=260,
+        height=400,
     )
     return fig
