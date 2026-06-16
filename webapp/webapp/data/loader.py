@@ -109,6 +109,22 @@ def _load_one(aircraft_type: str, sources: AircraftDataSources) -> AircraftBundl
         md = md.dt.tz_localize(None)
     wash_maint["maint_datetime"] = md
 
+    # Some engines log several wash records at the same maint_datetime (e.g. ATA 340
+    # + ATA 330 entered together). They all anchor to the same first-flight-after in
+    # the wash calculator, which collapses them into one segment and keeps only the
+    # last-written ATA — silently dropping the other wash from the report. Collapse
+    # such same-(engine, datetime) collisions to a single record so nothing vanishes.
+    # For now we keep the earliest-mutated row and drop the later ones.
+    # TODO: flip this to keep the LATEST-mutated row (the corrected / most recent
+    # entry) once downstream consumers expect that.
+    mt = pd.to_datetime(wash_maint["mutation_time"], errors="coerce")
+    if mt.dt.tz is not None:
+        mt = mt.dt.tz_localize(None)
+    wash_maint["mutation_time"] = mt
+    wash_maint = wash_maint.sort_values("mutation_time").drop_duplicates(
+        subset=["engine_id", "maint_datetime"], keep="first"
+    )
+
     takeoff_df = pd.read_parquet(sources["takeoff"])
     takeoff_df = takeoff_df.dropna(subset=["engine_id", "flight_datetime"]).copy()
     takeoff_df["engine_id"] = takeoff_df["engine_id"].astype(int).astype(str)
