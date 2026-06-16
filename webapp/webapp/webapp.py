@@ -11,6 +11,8 @@ from .pages.schedule import schedule_page
 from .pages.egt import egt_page
 from .state.analysis import AnalysisState
 from .state.auth import AuthState
+from .state.base import GlobalState
+from .state.degradation import DegradationState
 from .state.egt import EgtState
 from .state.schedule import ScheduleState
 
@@ -25,23 +27,23 @@ app.add_page(
     degradation_page,
     route="/",
     title="ECM — Degradation",
-    on_load=AuthState.require_auth,
+    on_load=[AuthState.require_auth, GlobalState.hydrate_prefs, DegradationState.hydrate_prefs],
 )
 app.add_page(
     analysis_page,
     route="/analysis",
     title="ECM — Wash Analysis",
-    on_load=[AuthState.require_auth, AnalysisState.on_load],
+    on_load=[AuthState.require_auth, GlobalState.hydrate_prefs, AnalysisState.on_load],
 )
 app.add_page(
     schedule_page,
     route="/schedule",
     title="ECM — Wash Schedule",
-    on_load=[AuthState.require_auth, ScheduleState.on_load],
+    on_load=[AuthState.require_auth, GlobalState.hydrate_prefs, ScheduleState.on_load],
 )
 app.add_page(
     egt_page,
     route="/egt",
     title="ECM — EGT Indication",
-    on_load=[AuthState.require_auth, EgtState.on_load],
+    on_load=[AuthState.require_auth, GlobalState.hydrate_prefs, EgtState.on_load],
 )

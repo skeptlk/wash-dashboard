@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Optional
 
@@ -81,10 +82,13 @@ def _trend_to_row(t: LifetimeTrend, label: str) -> dict:
 class DegradationState(rx.State):
     """Per-page state for the Degradation view."""
 
-    selected_parameter: str = "EGTHDM"
-    selected_engine_id: str = ""
+    # Persisted across visits (see GlobalState for the LocalStorage rationale).
+    selected_parameter: str = rx.LocalStorage("EGTHDM", name="ew_deg_param", sync=True)
+    selected_engine_id: str = rx.LocalStorage("", name="ew_deg_engine", sync=True)
     engine_search: str = ""
     normal_rate: float = -3.86
+    # JSON-serialized mirror of normal_rate (LocalStorage is string-only).
+    normal_rate_store: str = rx.LocalStorage("", name="ew_deg_normal_rate", sync=True)
     is_computing: bool = False
     has_results: bool = False
 
@@ -138,6 +142,21 @@ class DegradationState(rx.State):
     def set_normal_rate(self, value: str):
         try:
             self.normal_rate = float(value)
+        except (ValueError, TypeError):
+            return
+        self.normal_rate_store = json.dumps(self.normal_rate)
+
+    @rx.event
+    def hydrate_prefs(self):
+        """Restore the persisted normal-rate value from localStorage.
+
+        ``selected_parameter``/``selected_engine_id`` are LocalStorage-backed and
+        auto-hydrated by Reflex; only the float mirror needs manual restoration.
+        """
+        if not self.normal_rate_store:
+            return
+        try:
+            self.normal_rate = float(json.loads(self.normal_rate_store))
         except (ValueError, TypeError):
             pass
 
