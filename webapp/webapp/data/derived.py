@@ -98,6 +98,27 @@ def utilization_for(
     ]
 
 
+def maint_events_for_ata(
+    bundle: AircraftBundle,
+    engine_id: str,
+    ata_codes: list[str],
+) -> list[tuple[datetime, str]]:
+    """Return (maint_datetime, ata_code) pairs for the given ATA codes.
+
+    Strips timezone info from timestamps to match the tz-naive flight datetimes.
+    """
+    df = bundle.maintenance_df
+    mask = (df["engine_id"] == engine_id) & (~df["deleted"]) & df["ata_code"].isin(ata_codes)
+    sub = df.loc[mask, ["maint_datetime", "ata_code"]].dropna(subset=["maint_datetime"])
+    result = []
+    for row in sub.itertuples(index=False):
+        dt = pd.to_datetime(row.maint_datetime)
+        if dt.tzinfo is not None:
+            dt = dt.tz_localize(None)
+        result.append((dt.to_pydatetime(), row.ata_code))
+    return result
+
+
 def maint_for(bundle: AircraftBundle, engine_id: str) -> list[MaintenanceRecord]:
     """Build a list of MaintenanceRecord for one engine from wash_maint.
     """

@@ -15,7 +15,7 @@ import reflex as rx
 from plotly.subplots import make_subplots
 
 from ..data import LOADED
-from ..data.derived import PARAMETER_BY_NAME, flights_for
+from ..data.derived import PARAMETER_BY_NAME, flights_for, maint_events_for_ata
 from ..data.egt_indication import (
     EGT_FAILURE_ENGINES,
     EGT_PREDICTION_ENGINES,
@@ -166,6 +166,21 @@ class EgtState(rx.State):
                 )
 
             fig.update_yaxes(title_text=pname, row=i, col=1)
+
+        # Maintenance events (ATA 223/224) as dotted vertical lines.
+        for dt, ata in sorted(maint_events_for_ata(bundle, eid, ["223", "224"]), key=lambda x: x[0]):
+            fig.add_shape(
+                type="line", x0=dt, x1=dt, y0=0, y1=1,
+                xref="x", yref="paper",
+                line={"color": "darkorchid", "width": 1.2, "dash": "dot"},
+                layer="above",
+            )
+            fig.add_annotation(
+                x=dt, y=0.99, xref="x", yref="paper",
+                text=f"ATA {ata}", showarrow=False,
+                font={"size": 8, "color": "darkorchid"}, yanchor="top",
+                textangle=-90,
+            )
 
         # Shade predicted-failure spans across every parameter row.
         for s, e in failure_spans_for(eid, start=start, end=end):

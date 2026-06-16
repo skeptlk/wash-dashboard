@@ -150,8 +150,7 @@ def _delta_color(row: rx.Var) -> rx.Var:
 
 
 def _summary_row(row: rx.Var) -> rx.Component:
-    row_key = row["engine_id"].to_string() + ":" + row["event_index"].to_string()
-    is_selected = AnalysisState.selected_event_key == row_key
+    is_selected = AnalysisState.selected_event_key == row["row_key"]
     return rx.table.row(
         rx.table.cell(row["engine_label"], max_width="200px", overflow="hidden", text_overflow="ellipsis", white_space="nowrap"),
         rx.table.cell(row["event_index"]),

@@ -62,8 +62,8 @@ def _event_zoom_range(m) -> list[str]:
         rights.append(m.loss_of_efficiency_point.flight_datetime)
 
     half = max(wash_t - min(lefts), max(rights) - wash_t)
-    if half <= timedelta(0):
-        half = timedelta(days=60)
+    if half < timedelta(days=90):
+        half = timedelta(days=90)
     pad = half * 0.25
     x0 = wash_t - half - pad
     x1 = wash_t + half + pad
@@ -73,6 +73,7 @@ def _event_zoom_range(m) -> list[str]:
 def _event_to_row(ev, label: str) -> dict:
     return {
         "engine_id": ev.engine_id,
+        "row_key": f"{ev.engine_id}:{ev.event_index}",
         "engine_label": label,
         "event_index": ev.event_index,
         "maint_date": ev.maint_datetime.strftime("%Y-%m-%d") if ev.maint_datetime else "—",
