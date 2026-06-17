@@ -23,6 +23,7 @@ from .models import (
 )
 from .smoothing import running_mean, smooth_series
 from .detection import compute_wash_means, detect_loss_of_efficiency
+from .egt_prediction import predict_egt_failure
 
 __all__ = [
     "WashCalculator",
@@ -43,6 +44,7 @@ __all__ = [
     "smooth_series",
     "compute_wash_means",
     "detect_loss_of_efficiency",
+    "predict_egt_failure",
     "PlotPoint",
     "PlotCurve",
     "PlotSegment",

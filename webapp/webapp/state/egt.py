@@ -8,9 +8,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
+import pandas as pd
 import plotly.graph_objects as go
 import reflex as rx
 from plotly.subplots import make_subplots
+
+from enginewash import predict_egt_failure
 
 from ..data import LOADED
 from ..data.derived import PARAMETER_BY_NAME, flights_for, maint_events_for_ata
@@ -19,19 +22,21 @@ from ..data.egt_indication import (
     EGT_PREDICTION_ENGINES,
     failure_spans_for,
 )
-from ..trends import compute_group_trends
 from .base import GlobalState
 
-# Predictions are Boeing-only, so this page is pinned to the B737 bundle.
 _AIRCRAFT_TYPE = "B737"
 
-# Charted top-to-bottom; each parameter pulls from its source-of-truth frame via flights_for
 _PARAMS = ["EGTHDM", "DEGT", "GWFM"]
 _PARAM_COLORS = {"EGTHDM": "#1f77b4", "DEGT": "#1f77b4", "GWFM": "#1f77b4"}
 
-# Match the degradation page's segmentation/smoothing.
 _SMOOTH_WINDOW = 30
-_GROUP_GAP_DAYS = 30.0
+
+# Show ATA markers up to this many days before the first flight (context).
+_ATA_GRACE_DAYS = 60
+
+# Defaults for the simple heuristic EGT-failure model.
+_DEFAULT_EGTHDM_THRESHOLD = 10.0
+_DEFAULT_LOOKBACK_CYCLES = 30
 
 
 def _parse_date(s: str) -> Optional[datetime]:
@@ -49,6 +54,10 @@ class EgtState(rx.State):
     selected_engine_id: str = ""
     engine_search: str = ""
     available_engines_labeled: list[dict] = []  # [{"id", "label"}]
+
+    # Simple heuristic-model parameters.
+    egthdm_threshold: float = _DEFAULT_EGTHDM_THRESHOLD
+    lookback_cycles: int = _DEFAULT_LOOKBACK_CYCLES
 
     has_chart: bool = False
     chart_figure: go.Figure = go.Figure()
@@ -88,6 +97,24 @@ class EgtState(rx.State):
         self.engine_search = value
 
     @rx.event
+    async def set_egthdm_threshold(self, value: str):
+        try:
+            self.egthdm_threshold = float(value)
+        except (TypeError, ValueError):
+            return
+        if self.selected_engine_id:
+            await self._build_chart()
+
+    @rx.event
+    async def set_lookback_cycles(self, value: str):
+        try:
+            self.lookback_cycles = max(1, int(float(value)))
+        except (TypeError, ValueError):
+            return
+        if self.selected_engine_id:
+            await self._build_chart()
+
+    @rx.event
     async def on_load(self):
         self._build_engine_list()
         if self.available_engines_labeled and (
@@ -116,6 +143,11 @@ class EgtState(rx.State):
         eid = self.selected_engine_id
         label = bundle.engine_labels.get(eid, eid)
 
+        # Track the span actually covered by flight data, so out-of-range
+        # markers (e.g. an ATA event predating the data) don't stretch the axis.
+        data_min: Optional[datetime] = None
+        data_max: Optional[datetime] = None
+
         fig = make_subplots(
             rows=len(_PARAMS),
             cols=1,
@@ -130,11 +162,17 @@ class EgtState(rx.State):
             flights = flights_for(bundle, eid, param, start=start, end=end)
             flights.sort(key=lambda f: f.flight_datetime)
 
-            # Raw points (faint)
+            xs = [f.flight_datetime for f in flights]
+            ys = [f.float_value for f in flights]
+
+            if xs:
+                data_min = xs[0] if data_min is None else min(data_min, xs[0])
+                data_max = xs[-1] if data_max is None else max(data_max, xs[-1])
+
             fig.add_trace(
                 go.Scattergl(
-                    x=[f.flight_datetime for f in flights],
-                    y=[f.float_value for f in flights],
+                    x=xs,
+                    y=ys,
                     mode="markers",
                     name=pname,
                     marker={"size": 3, "color": "#888", "opacity": 0.25},
@@ -143,28 +181,52 @@ class EgtState(rx.State):
                 col=1,
             )
 
-            # Centered moving-average curve per gap-split segment (as on the
-            # degradation page).
-            for g in compute_group_trends(
-                flights, param, gap_days=_GROUP_GAP_DAYS, smooth_window=_SMOOTH_WINDOW
-            ):
-                fig.add_trace(
-                    go.Scatter(
-                        x=list(g.xs),
-                        y=list(g.smoothed),
-                        mode="lines",
-                        name=f"{pname} smooth",
-                        line={"color": color, "width": 1.5},
-                        opacity=0.9,
-                    ),
-                    row=i,
-                    col=1,
+            smoothed = pd.Series(ys).rolling(_SMOOTH_WINDOW, center=True, min_periods=1).mean()
+            fig.add_trace(
+                go.Scatter(
+                    x=xs,
+                    y=smoothed.tolist(),
+                    mode="lines",
+                    name=f"{pname} smooth",
+                    line={"color": color, "width": 1.5},
+                    opacity=0.9,
+                ),
+                row=i,
+                col=1,
+            )
+
+            # Overlay the simple heuristic model's predicted failures on EGTHDM.
+            if pname == "EGTHDM":
+                predictions = predict_egt_failure(
+                    eid,
+                    flights,
+                    egthdm_threshold=self.egthdm_threshold,
+                    lookback_cycles=self.lookback_cycles,
+                    smooth_window=_SMOOTH_WINDOW,
                 )
+                if predictions:
+                    px, py = zip(*predictions)
+                    fig.add_trace(
+                        go.Scatter(
+                            x=list(px),
+                            y=list(py),
+                            mode="markers",
+                            name="Model prediction",
+                            marker={"symbol": "x", "size": 7, "color": "red"},
+                        ),
+                        row=i,
+                        col=1,
+                    )
 
             fig.update_yaxes(title_text=pname, row=i, col=1)
 
-        # Maintenance events (ATA 223/224) as dotted vertical lines.
+        # Maintenance events (ATA 223/224) as dotted vertical lines. Skip events
+        # outside the flight-data span (with a small grace window before the
+        # first flight) — they'd otherwise stretch the x-axis.
+        ata_lo = data_min - pd.Timedelta(days=_ATA_GRACE_DAYS) if data_min is not None else None
         for dt, ata in sorted(maint_events_for_ata(bundle, eid, ["223", "224"]), key=lambda x: x[0]):
+            if ata_lo is not None and (dt < ata_lo or dt > data_max):
+                continue
             fig.add_shape(
                 type="line", x0=dt, x1=dt, y0=0, y1=1,
                 xref="x", yref="paper",

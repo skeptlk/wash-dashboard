@@ -37,10 +37,47 @@ def _engine_row(e: rx.Var) -> rx.Component:
     )
 
 
+def _model_params() -> rx.Component:
+    return rx.vstack(
+        rx.text("Model parameters", size="2", weight="medium"),
+        rx.hstack(
+            rx.text("EGTHDM threshold", size="1"),
+            rx.input(
+                type="number",
+                value=EgtState.egthdm_threshold,
+                on_change=EgtState.set_egthdm_threshold.debounce(400),
+                size="1",
+                width="80px",
+            ),
+            justify="between",
+            align="center",
+            width="100%",
+        ),
+        rx.hstack(
+            rx.text("Lookback cycles", size="1"),
+            rx.input(
+                type="number",
+                value=EgtState.lookback_cycles,
+                on_change=EgtState.set_lookback_cycles.debounce(400),
+                min=1,
+                size="1",
+                width="80px",
+            ),
+            justify="between",
+            align="center",
+            width="100%",
+        ),
+        spacing="2",
+        align="stretch",
+        width="100%",
+    )
+
+
 def _control_panel() -> rx.Component:
     return rx.vstack(
         rx.heading("Controls", size="4"),
         date_range_picker(),
+        _model_params(),
         rx.vstack(
             rx.text("Engine", size="2", weight="medium"),
             rx.input(
