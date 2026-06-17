@@ -1,8 +1,6 @@
 """State for the EGT Indication page.
 
-Boeing-only view of the EGT-sensor failure ML predictions. For a selected
-engine it charts EGTHDM, DEGT and GWFM (values from the Boeing parquet files —
-the source of truth) and shades the time spans the model predicts as failing.
+View of the EGT probe failure ML predictions
 """
 
 from __future__ import annotations
@@ -27,10 +25,9 @@ from .base import GlobalState
 # Predictions are Boeing-only, so this page is pinned to the B737 bundle.
 _AIRCRAFT_TYPE = "B737"
 
-# Charted top-to-bottom; each parameter pulls from its source-of-truth frame
-# via flights_for (EGTHDM ← takeoff, DEGT/GWFM ← cruise).
+# Charted top-to-bottom; each parameter pulls from its source-of-truth frame via flights_for
 _PARAMS = ["EGTHDM", "DEGT", "GWFM"]
-_PARAM_COLORS = {"EGTHDM": "#1f77b4", "DEGT": "#d62728", "GWFM": "#2ca02c"}
+_PARAM_COLORS = {"EGTHDM": "#1f77b4", "DEGT": "#1f77b4", "GWFM": "#1f77b4"}
 
 # Match the degradation page's segmentation/smoothing.
 _SMOOTH_WINDOW = 30
@@ -133,8 +130,7 @@ class EgtState(rx.State):
             flights = flights_for(bundle, eid, param, start=start, end=end)
             flights.sort(key=lambda f: f.flight_datetime)
 
-            # Raw points (faint) so the underlying data stays visible behind the
-            # smoothed curve.
+            # Raw points (faint)
             fig.add_trace(
                 go.Scattergl(
                     x=[f.flight_datetime for f in flights],
@@ -197,7 +193,7 @@ class EgtState(rx.State):
                 )
 
         fig.update_layout(
-            title=f"{label} — EGT sensor failure prediction",
+            title=f"{label} — EGT probe failure prediction",
             margin={"l": 60, "r": 20, "t": 60, "b": 40},
             height=720,
             showlegend=False,
