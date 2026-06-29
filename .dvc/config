@@ -1,0 +1,7 @@
+[core]
+    analytics = false
+    remote = ycloud
+['remote "ycloud"']
+    url = s3://ecm-data/egt-indication-dvc
+    endpointurl = https://storage.yandexcloud.net
+    region = ru-central1

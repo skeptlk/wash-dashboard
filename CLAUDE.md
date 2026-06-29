@@ -97,6 +97,79 @@ webapp/
 
 Add an entry to `AIRCRAFT_DATA_REGISTRY` in `webapp/webapp/data/registry.py` with URLs for `onwing`, `maintenance`, `takeoff`, `cruise`. Restart the app — the loader picks it up automatically and the type appears in every page's selector.
 
+### EGT data labeling & dataset versioning (DVC)
+
+The EGT page (`/egt`) doubles as a labeling tool. With **Label mode** on, drag-select a
+span on the chart (or type the start/end dates), choose `failure = 0/1`, and **Apply** to
+record a whole-engine label range. **Export & version** bakes all labels into a curated
+dataset and updates the DVC pointers.
+
+- **`webapp/webapp/data/labels.py`** — overlay store + curated export. Writes two parquet
+  files under the repo-root `data/` dir:
+  - `egt_manual_labels.parquet` — overlay of manual corrections vs. the auto baseline
+    (`engine_id, start_datetime, end_datetime, failure_value, labeled_by, labeled_at, note`).
+    Labeling is **idempotent per flight**: a flight already at the requested value (from
+    auto or a prior change) is left alone, and the overlay is rebuilt as a minimal,
+    non-overlapping set of correction ranges — re-labeling never appends duplicates, and
+    reverting a flight to its auto value removes it from the overlay.
+  - `egt_indication_curated.parquet` — copy of the auto-labels frame plus a `failure_value`
+    column (= `failure_value_auto`, overridden per manual range, latest label wins).
+- The raw auto-labels frame is reused from `egt_indication.py:RAW_AUTO_LABELS` (no re-download).
+- Both files are **DVC-tracked**; the `*.dvc` pointers are committed to git, the parquet
+  files are gitignored. The web app runs `dvc add` on export but never commits or pushes.
+
+**`labels.py` public API** (all pure pandas, overlay cached in-memory + written through):
+- `add_label(engine_id, start, end, failure_value, labeled_by="", note="") -> int` —
+  label every flight reading of the engine in the **exact** closed interval `[start, end]`
+  (timestamp-precise, no day snapping). Idempotent per flight; returns the count of flights
+  whose effective label changed (`0` = no-op). Rebuilds the engine's overlay rows as
+  minimal diff-vs-auto ranges (range bounds are actual flight timestamps).
+- `delete_label(row_id)` — drop one correction range (reverts those flights to auto).
+- `labels_for(engine_id) -> list[dict]` — correction ranges for the UI list.
+- `manual_spans_for(engine_id, start, end) -> [(start, end, value)]` — for chart shading.
+- `export_curated() -> {rows, overridden, path}` / `dvc_add() -> (ok, output)`.
+
+**EGT page controls & state** (`pages/egt.py` `_labeling_panel()`, `state/egt.py:EgtState`):
+- `label_mode` switch toggles the labeling panel and the chart's plotly `dragmode`
+  (`select` ↔ `zoom`); rebuilds the chart so the mode change takes effect.
+- `on_plot_selected(points)` — box-select handler; takes min/max `x` of the selected
+  points and fills `label_start` / `label_end` at full timestamp precision (the inputs are
+  `datetime-local`, `step=1`). `on_relayout` carries no args in this Reflex version, so the
+  typed inputs are the reliable fallback.
+- `set_label_value(value)` accepts the segmented control's `str | list[str]` → `0/1`.
+- `apply_label` (calls `add_label`, reports changed-count or "no change"),
+  `delete_label(row_id)`, `export_dataset` (runs `export_curated` then `dvc_add`, sets
+  `export_status` with the `git commit` / `dvc push` reminder).
+- Chart overlay: auto failure spans stay light-red; manual corrections are drawn on top —
+  green outline for `failure=0` (cleared), red outline for `failure=1`.
+
+**Cross-parameter matching:** a label range matches by **exact timestamp**. EGTHDM
+(takeoff phase) and DEGT/GWFM (cruise phase) have *different* `flight_datetime` per logical
+flight, so each parameter's points are matched independently — every row of any parameter
+whose timestamp falls in the exact interval `[start, end]` gets the label. There is no
+flight-id join in this dataset, so labels are keyed to absolute time, not to a logical
+flight; at the range edges, a takeoff reading and a same-day cruise reading just outside the
+bounds are treated separately (pick the bounds to include the readings you intend).
+
+**DVC remote:** `ycloud` → `s3://ecm-data/egt-indication-dvc` (same Yandex bucket as the
+data, separate prefix — created automatically on first `dvc push`, no manual bucket
+setup), configured in `.dvc/config`. Credentials come from `~/.aws/credentials`.
+
+Publish a new dataset version after labeling:
+
+```bash
+cd <repo root>
+git add data/*.dvc data/.gitignore   # commit the updated pointers
+git commit -m "Label EGT failures: <description>"
+dvc push                             # upload parquet to the bucket
+```
+
+> ⚠️ `dvc push` needs working write keys for `s3://ecm-data`. The keys currently in
+> `~/.aws/credentials` fail with `SignatureDoesNotMatch` (reads work — the bucket is public
+> over HTTP). Fix the keys (e.g. `yc iam access-key create`) or set them on the remote with
+> `dvc remote modify --local ycloud access_key_id <id>` / `secret_access_key <secret>`
+> before pushing. The local label/export flow works without this.
+
 ---
 
 ## Dash Dashboard (`dashboard/`)
