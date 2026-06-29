@@ -14,11 +14,11 @@ from .models import (
 )
 
 
-# (kind, source column, split_at_segments)
-_CURVE_COLUMNS: tuple[tuple[str, str, bool], ...] = (
-    ("raw", "float_value", False),
-    ("smooth", "float_value_smooth", True),
-    ("smooth_custom", "float_value_smooth_custom", True),
+# (kind, source column)
+_CURVE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("raw", "float_value"),
+    ("smooth", "float_value_smooth"),
+    ("smooth_custom", "float_value_smooth_custom"),
 )
 
 
@@ -41,8 +41,8 @@ def build_wash_plot(
     for engine_id, eng_df in engine_dfs:
         segments = {int(idx): grp for idx, grp in eng_df.groupby("event_cum")}
 
-        for kind, col, split in _CURVE_COLUMNS:
-            curves.append(_build_curve(eng_df, col, kind, engine_id, split))
+        for kind, col in _CURVE_COLUMNS:
+            curves.append(_build_curve(eng_df, col, kind, engine_id))
 
         for event in events_by_engine.get(engine_id, []):
             markers.append(_build_wash_markers(event, segments, n_obs_mean, engine_id))
@@ -55,24 +55,28 @@ def _build_curve(
     value_col: str,
     kind: str,
     engine_id: str,
-    split_at_segments: bool,
 ) -> PlotCurve:
-    cols = ["flight_datetime", value_col]
-    if split_at_segments:
-        cols.append("event_cum")
-    sub = eng_df[cols].dropna(subset=[value_col])
+    sub = eng_df[["flight_datetime", value_col, "event_cum"]].dropna(subset=[value_col])
+
+    if kind == "raw":
+        return PlotCurve(
+            kind=kind,
+            engine_id=engine_id,
+            points= tuple(
+                PlotPoint(flight_datetime=dt.to_pydatetime(), value=v)
+                for dt, v in zip(eng_df["flight_datetime"], eng_df[value_col])
+            )
+        )
 
     points: list[PlotPoint] = []
     prev_seg: int | None = None
-    if split_at_segments:
-        for dt, v, seg in zip(sub["flight_datetime"], sub[value_col], sub["event_cum"]):
-            if prev_seg is not None and seg != prev_seg:
-                points.append(PlotPoint(flight_datetime=dt.to_pydatetime(), value=None))
-            points.append(PlotPoint(flight_datetime=dt.to_pydatetime(), value=float(v)))
-            prev_seg = seg
-    else:
-        for dt, v in zip(sub["flight_datetime"], sub[value_col]):
-            points.append(PlotPoint(flight_datetime=dt.to_pydatetime(), value=float(v)))
+
+    for dt, v, seg in zip(sub["flight_datetime"], sub[value_col], sub["event_cum"]):
+        if prev_seg is not None and seg != prev_seg:
+            points.append(PlotPoint(flight_datetime=dt.to_pydatetime(), value=None))
+        points.append(PlotPoint(flight_datetime=dt.to_pydatetime(), value=v))
+        prev_seg = seg
+
     return PlotCurve(kind=kind, engine_id=engine_id, points=tuple(points))
 
 

@@ -40,32 +40,176 @@ def _engine_row(e: rx.Var) -> rx.Component:
 def _model_params() -> rx.Component:
     return rx.vstack(
         rx.text("Model parameters", size="2", weight="medium"),
-        rx.hstack(
-            rx.text("EGTHDM threshold", size="1"),
-            rx.input(
-                type="number",
-                value=EgtState.egthdm_threshold,
-                on_change=EgtState.set_egthdm_threshold.debounce(400),
-                size="1",
-                width="80px",
+        rx.vstack(
+            rx.hstack(
+                rx.text("EGTHDM threshold", size="1"),
+                rx.spacer(),
+                rx.input(
+                    type="number",
+                    value=EgtState.egthdm_threshold,
+                    on_change=EgtState.set_egthdm_threshold.debounce(400),
+                    size="1",
+                    width="70px",
+                ),
+                align="center",
+                width="100%",
             ),
-            justify="between",
+            rx.slider(
+                value=[EgtState.egthdm_threshold],
+                on_change=EgtState.set_egthdm_threshold.debounce(300),
+                min=0,
+                max=50,
+                step=0.5,
+                size="1",
+                width="100%",
+            ),
+            spacing="1",
+            align="stretch",
+            width="100%",
+        ),
+        rx.vstack(
+            rx.hstack(
+                rx.text("Lookback cycles", size="1"),
+                rx.spacer(),
+                rx.input(
+                    type="number",
+                    value=EgtState.lookback_cycles,
+                    on_change=EgtState.set_lookback_cycles.debounce(400),
+                    min=1,
+                    size="1",
+                    width="70px",
+                ),
+                align="center",
+                width="100%",
+            ),
+            rx.slider(
+                value=[EgtState.lookback_cycles],
+                on_change=EgtState.set_lookback_cycles.debounce(300),
+                min=1,
+                max=100,
+                step=1,
+                size="1",
+                width="100%",
+            ),
+            spacing="1",
+            align="stretch",
+            width="100%",
+        ),
+        spacing="3",
+        align="stretch",
+        width="100%",
+    )
+
+
+def _label_row(e: rx.Var) -> rx.Component:
+    return rx.hstack(
+        rx.cond(
+            e["failure_value"] == 1,
+            rx.icon("triangle-alert", size=12, color="var(--red-9)"),
+            rx.icon("check", size=12, color="var(--green-9)"),
+        ),
+        rx.text(e["start"].to(str) + " → " + e["end"].to(str), size="1"),
+        rx.spacer(),
+        rx.icon(
+            "trash-2",
+            size=12,
+            color="var(--gray-9)",
+            cursor="pointer",
+            on_click=EgtState.delete_label(e["row_id"]),
+        ),
+        spacing="2",
+        align="center",
+        width="100%",
+    )
+
+
+def _labeling_panel() -> rx.Component:
+    return rx.vstack(
+        rx.hstack(
+            rx.text("Label mode", size="2", weight="medium"),
+            rx.spacer(),
+            rx.switch(
+                checked=EgtState.label_mode,
+                on_change=EgtState.toggle_label_mode,
+            ),
             align="center",
             width="100%",
         ),
-        rx.hstack(
-            rx.text("Lookback cycles", size="1"),
-            rx.input(
-                type="number",
-                value=EgtState.lookback_cycles,
-                on_change=EgtState.set_lookback_cycles.debounce(400),
-                min=1,
-                size="1",
-                width="80px",
+        rx.cond(
+            EgtState.label_mode,
+            rx.vstack(
+                rx.text(
+                    "Drag-select on the chart to fill the range, or type it below.",
+                    size="1",
+                    color="var(--gray-10)",
+                ),
+                rx.vstack(
+                    rx.input(
+                        type="datetime-local",
+                        step=1,
+                        value=EgtState.label_start,
+                        on_change=EgtState.set_label_start,
+                        size="1",
+                    ),
+                    rx.input(
+                        type="datetime-local",
+                        step=1,
+                        value=EgtState.label_end,
+                        on_change=EgtState.set_label_end,
+                        size="1",
+                    ),
+                    spacing="2",
+                    width="100%",
+                ),
+                rx.segmented_control.root(
+                    rx.segmented_control.item("No failure", value="0"),
+                    rx.segmented_control.item("Failure", value="1"),
+                    value=EgtState.label_value.to_string(),
+                    on_change=EgtState.set_label_value,
+                    size="1",
+                    width="100%",
+                ),
+                rx.button(
+                    "Apply label",
+                    on_click=EgtState.apply_label,
+                    size="1",
+                    width="100%",
+                ),
+                rx.cond(
+                    EgtState.manual_labels.length() > 0,
+                    rx.vstack(
+                        rx.text("Labels for this engine", size="1", weight="medium"),
+                        rx.scroll_area(
+                            rx.vstack(
+                                rx.foreach(EgtState.manual_labels, _label_row),
+                                spacing="1",
+                                align="stretch",
+                                width="100%",
+                            ),
+                            max_height="140px",
+                            width="100%",
+                        ),
+                        spacing="1",
+                        align="stretch",
+                        width="100%",
+                    ),
+                ),
+                rx.divider(),
+                rx.button(
+                    "Export & version",
+                    on_click=EgtState.export_dataset,
+                    size="1",
+                    variant="soft",
+                    width="100%",
+                ),
+                rx.cond(
+                    EgtState.export_status != "",
+                    rx.text(EgtState.export_status, size="1", color="var(--gray-10)"),
+                ),
+                spacing="2",
+                align="stretch",
+                width="100%",
             ),
-            justify="between",
-            align="center",
-            width="100%",
         ),
         spacing="2",
         align="stretch",
@@ -78,6 +222,7 @@ def _control_panel() -> rx.Component:
         rx.heading("Controls", size="4"),
         date_range_picker(),
         _model_params(),
+        _labeling_panel(),
         rx.vstack(
             rx.text("Engine", size="2", weight="medium"),
             rx.input(
@@ -116,7 +261,12 @@ def _results_panel() -> rx.Component:
     return rx.vstack(
         rx.cond(
             EgtState.has_chart,
-            rx.plotly(data=EgtState.chart_figure, width="100%", height="720px"),
+            rx.plotly(
+                data=EgtState.chart_figure,
+                on_selected=EgtState.on_plot_selected,
+                width="100%",
+                height="720px",
+            ),
             rx.callout(
                 "Select an engine to see its EGT failure prediction.",
                 icon="info",

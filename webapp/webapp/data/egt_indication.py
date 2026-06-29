@@ -25,6 +25,12 @@ EGT_PREDICTIONS_URL = (
 # engine_id -> DataFrame[flight_datetime, failure], one row per flight, time-sorted.
 _BY_ENGINE: dict[str, pd.DataFrame] = {}
 
+# Full per-(engine, parameter, flight) auto-labels frame, normalized once at load.
+# Exposed so the labeling/export pipeline (`data/labels.py`) can build a curated copy
+# without re-downloading the parquet. Columns mirror the source plus a normalized
+# string `engine_id` and tz-naive `flight_datetime`.
+RAW_AUTO_LABELS: pd.DataFrame = pd.DataFrame()
+
 # Engines (str ids) that have predictions, sorted.
 EGT_PREDICTION_ENGINES: list[str] = []
 
@@ -33,7 +39,7 @@ EGT_FAILURE_ENGINES: set[str] = set()
 
 
 def _load() -> None:
-    global EGT_PREDICTION_ENGINES, EGT_FAILURE_ENGINES
+    global EGT_PREDICTION_ENGINES, EGT_FAILURE_ENGINES, RAW_AUTO_LABELS
 
     df = pd.read_parquet(EGT_PREDICTIONS_URL)
     df = df.dropna(subset=["engine_id", "flight_datetime"]).copy()
@@ -44,6 +50,8 @@ def _load() -> None:
         dt = dt.dt.tz_localize(None)
     df["flight_datetime"] = dt
     df = df.dropna(subset=["flight_datetime"])
+
+    RAW_AUTO_LABELS = df.copy()
 
     df["failure"] = df["failure_value_auto"].fillna(0).astype(int)
 

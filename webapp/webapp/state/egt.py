@@ -16,6 +16,7 @@ from plotly.subplots import make_subplots
 from enginewash import predict_egt_failure
 
 from ..data import LOADED
+from ..data import labels as labels_store
 from ..data.derived import PARAMETER_BY_NAME, flights_for, maint_events_for_ata
 from ..data.egt_indication import (
     EGT_FAILURE_ENGINES,
@@ -62,6 +63,14 @@ class EgtState(rx.State):
     has_chart: bool = False
     chart_figure: go.Figure = go.Figure()
 
+    # --- Data-labeling state ---
+    label_mode: bool = False
+    label_start: str = ""
+    label_end: str = ""
+    label_value: int = 1  # 0 = no failure, 1 = failure
+    manual_labels: list[dict] = []  # overlay rows for the selected engine
+    export_status: str = ""
+
     @rx.var
     def filtered_engines(self) -> list[dict]:
         q = self.engine_search.strip().lower()
@@ -97,20 +106,32 @@ class EgtState(rx.State):
         self.engine_search = value
 
     @rx.event
-    async def set_egthdm_threshold(self, value: str):
+    async def set_egthdm_threshold(self, value: str | list):
+        # Number input hands back a string; slider hands back a [value] list.
+        if isinstance(value, list):
+            value = value[0] if value else None
         try:
-            self.egthdm_threshold = float(value)
+            new_value = float(value)
         except (TypeError, ValueError):
             return
+        if new_value == self.egthdm_threshold:
+            return
+        self.egthdm_threshold = new_value
         if self.selected_engine_id:
             await self._build_chart()
 
     @rx.event
-    async def set_lookback_cycles(self, value: str):
+    async def set_lookback_cycles(self, value: str | list):
+        # Number input hands back a string; slider hands back a [value] list.
+        if isinstance(value, list):
+            value = value[0] if value else None
         try:
-            self.lookback_cycles = max(1, int(float(value)))
+            new_value = max(1, int(float(value)))
         except (TypeError, ValueError):
             return
+        if new_value == self.lookback_cycles:
+            return
+        self.lookback_cycles = new_value
         if self.selected_engine_id:
             await self._build_chart()
 
@@ -123,12 +144,114 @@ class EgtState(rx.State):
         ):
             self.selected_engine_id = self.available_engines_labeled[0]["id"]
         if self.selected_engine_id:
+            self._refresh_labels()
             await self._build_chart()
 
     @rx.event
     async def select_engine(self, engine_id: str):
         self.selected_engine_id = engine_id
+        self._refresh_labels()
         await self._build_chart()
+
+    # --- Labeling events ---
+
+    def _refresh_labels(self) -> None:
+        if self.selected_engine_id:
+            self.manual_labels = labels_store.labels_for(self.selected_engine_id)
+        else:
+            self.manual_labels = []
+
+    @rx.event
+    async def toggle_label_mode(self, value: bool):
+        self.label_mode = value
+        if self.selected_engine_id:
+            await self._build_chart()
+
+    @rx.event
+    def set_label_start(self, value: str):
+        self.label_start = value
+
+    @rx.event
+    def set_label_end(self, value: str):
+        self.label_end = value
+
+    @rx.event
+    def set_label_value(self, value: str | list[str]):
+        # rx.segmented_control's on_change is typed str | list[str]; single-select
+        # hands back a plain string.
+        v = value[0] if isinstance(value, list) else value
+        try:
+            self.label_value = 1 if int(v) else 0
+        except (TypeError, ValueError):
+            self.label_value = 1 if str(v).strip().lower() in ("1", "failure", "true") else 0
+
+    @rx.event
+    def on_plot_selected(self, points: list[dict]):
+        """Box-select on the chart → set the label range from the points' x-span."""
+        xs = [p.get("x") for p in (points or []) if p.get("x") is not None]
+        if not xs:
+            return
+        ts = pd.to_datetime(pd.Series(xs), errors="coerce").dropna()
+        if ts.empty:
+            return
+        # Keep full precision so the exact drag boundaries are stored (the inputs
+        # are datetime-local). Format matches the <input type="datetime-local"> value.
+        self.label_start = ts.min().strftime("%Y-%m-%dT%H:%M:%S")
+        self.label_end = ts.max().strftime("%Y-%m-%dT%H:%M:%S")
+        if not self.label_mode:
+            self.label_mode = True
+
+    @rx.event
+    async def apply_label(self):
+        if not self.selected_engine_id:
+            self.export_status = "Select an engine first."
+            return
+        if not self.label_start or not self.label_end:
+            self.export_status = "Pick a start and end date (drag-select or type)."
+            return
+        try:
+            changed = labels_store.add_label(
+                self.selected_engine_id,
+                self.label_start,
+                self.label_end,
+                self.label_value,
+            )
+        except ValueError as exc:
+            self.export_status = f"Could not apply label: {exc}"
+            return
+        if changed == 0:
+            self.export_status = "No change — those flights are already labeled that way."
+        else:
+            self.export_status = (
+                f"Labeled {changed} flight(s) {self.label_start} → {self.label_end} "
+                f"as failure={self.label_value}."
+            )
+        self._refresh_labels()
+        await self._build_chart()
+
+    @rx.event
+    async def delete_label(self, row_id: str):
+        labels_store.delete_label(row_id)
+        self.export_status = "Label removed."
+        self._refresh_labels()
+        await self._build_chart()
+
+    @rx.event
+    def export_dataset(self):
+        try:
+            summary = labels_store.export_curated()
+        except RuntimeError as exc:
+            self.export_status = f"Export failed: {exc}"
+            return
+        ok, out = labels_store.dvc_add()
+        base = (
+            f"Exported {summary['rows']} rows ({summary['overridden']} overridden) "
+            f"to {summary['path']}."
+        )
+        if ok:
+            self.export_status = base + " DVC pointers updated — run `git commit` and `dvc push` to publish."
+        else:
+            self.export_status = base + f" (dvc add skipped: {out})"
 
     async def _build_chart(self):
         bundle = LOADED.get(_AIRCRAFT_TYPE)
@@ -240,7 +363,7 @@ class EgtState(rx.State):
                 textangle=-90,
             )
 
-        # Shade predicted-failure spans across every parameter row.
+        # Shade predicted-failure spans (auto model) across every parameter row.
         for s, e in failure_spans_for(eid, start=start, end=end):
             for i in range(1, len(_PARAMS) + 1):
                 fig.add_vrect(
@@ -254,11 +377,29 @@ class EgtState(rx.State):
                     col=1,
                 )
 
+        # Overlay the user's manual labels, distinct from the auto spans:
+        # green = cleared (failure 0), solid red outline = failure 1.
+        for s, e, val in labels_store.manual_spans_for(eid, start=start, end=end):
+            color = "#d62728" if val == 1 else "#2ca02c"
+            for i in range(1, len(_PARAMS) + 1):
+                fig.add_vrect(
+                    x0=s,
+                    x1=e,
+                    fillcolor=color,
+                    opacity=0.22,
+                    layer="below",
+                    line_width=1,
+                    line_color=color,
+                    row=i,
+                    col=1,
+                )
+
         fig.update_layout(
             title=f"{label} — EGT probe failure prediction",
-            margin={"l": 60, "r": 20, "t": 60, "b": 40},
-            height=720,
-            showlegend=False,
+            margin={"l": 50, "r": 10, "t": 50, "b": 30},
+            height=840,
+            showlegend=True,
+            dragmode="select" if self.label_mode else "zoom",
         )
         self.chart_figure = fig
         self.has_chart = True

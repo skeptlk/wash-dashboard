@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 from collections import OrderedDict
 from datetime import datetime
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
@@ -77,15 +78,17 @@ class WashCalculator:
         if "engine_id" not in flights_df.columns:
             return engine_results, all_events
 
+        maint_groups = defaultdict(lambda: pd.DataFrame(), {
+            name: group for name, group in maintenance_df.groupby("engine_id")
+        })
+
         for engine_id, eng_flights in flights_df.groupby("engine_id"):
-            eng_maint = maintenance_df.query("engine_id == @engine_id")
+            eng_maint = maint_groups[engine_id]
             df = self._prepare_data(eng_flights, eng_maint)
-            df["event_cum"] = df["event"].cumsum()
-            df = self._apply_smoothing(df)
             events = self._compute_deltas(
-                df, str(engine_id), parameter, utilization_lookup
+                df, engine_id, parameter, utilization_lookup
             )
-            engine_results.append((str(engine_id), df))
+            engine_results.append((engine_id, df))
             all_events.extend(events)
 
         return engine_results, all_events
@@ -182,41 +185,37 @@ class WashCalculator:
         return self._build_summaries(all_events)
 
     def _prepare_data(
-        self, flights_df: pd.DataFrame, maintenance_df: pd.DataFrame
+        self, eng_flights: pd.DataFrame, eng_maintenance: pd.DataFrame
     ) -> pd.DataFrame:
         """Anchor wash events to flights for a single engine.
-
         Each wash is attached to the first flight after the maintenance datetime.
         """
-        df = flights_df.copy()
-        # df["flight_datetime"] = pd.to_datetime(df["flight_datetime"])
+        df = eng_flights.copy()
         if df["flight_datetime"].dt.tz is not None:
             df["flight_datetime"] = (
                 df["flight_datetime"].dt.tz_convert("UTC").dt.tz_localize(None)
             )
         df = df.sort_values("flight_datetime").reset_index(drop=True)
-
-        if "float_value_smooth" not in df.columns:
-            df["float_value_smooth"] = np.nan
-
-        # Where pre-smoothed values are missing, fill with a running mean of raw values
-        missing = df["float_value_smooth"].isna()
-        if bool(missing.any()):
-            smoothed_raw = smooth_series(
-                df.loc[missing, "float_value"],  # pyright: ignore[reportArgumentType]
+ 
+        if "float_value_smooth" not in df.columns or sum(df["float_value_smooth"].isna()) > 0:
+            df["float_value_smooth"] = smooth_series(
+                df["float_value"],
                 window=self.config.pre_smooth_window,
             )
-            df.loc[missing, "float_value_smooth"] = smoothed_raw
 
         df["event"] = 0
         df["ata_code"] = None
         df["maint_datetime"] = pd.NaT
 
-        if len(maintenance_df) == 0:
+        if len(eng_maintenance) == 0:
+            df["event_cum"] = 0
+            df["float_value_smooth_custom"] = smooth_series(
+                df["float_value_smooth"],
+                window=self.config.smooth_window,
+            )
             return df
 
-        maint = maintenance_df.copy()
-        # maint["maint_datetime"] = pd.to_datetime(maint["maint_datetime"])
+        maint = eng_maintenance.copy()
         if maint["maint_datetime"].dt.tz is not None:
             maint["maint_datetime"] = (
                 maint["maint_datetime"].dt.tz_convert("UTC").dt.tz_localize(None)
@@ -233,17 +232,13 @@ class WashCalculator:
                 df.loc[first_idx, "ata_code"] = ata
                 df.loc[first_idx, "maint_datetime"] = mdt
 
-        return df
-
-    def _apply_smoothing(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply centered running mean within each event segment."""
-        df["float_value_smooth_custom"] = np.nan
+        df["event_cum"] = df["event"].cumsum()
 
         for _, grp in df.groupby("event_cum"):
             smoothed = smooth_series(
-                grp["float_value_smooth"],  # pyright: ignore[reportArgumentType]
+                grp["float_value_smooth"],
                 window=self.config.smooth_window,
-                fallback=grp["float_value"],  # pyright: ignore[reportArgumentType]
+                fallback=grp["float_value"],
             )
             df.loc[grp.index, "float_value_smooth_custom"] = smoothed
 
@@ -251,27 +246,27 @@ class WashCalculator:
 
     def _compute_deltas(
         self,
-        df: pd.DataFrame,
+        eng_df: pd.DataFrame,
         engine_id: str,
         parameter: WashParameter,
         utilization_lookup: UtilizationLookup | None = None,
     ) -> list[WashEvent]:
         """Compute before/after deltas and detect loss-of-efficiency for one engine."""
         events: list[WashEvent] = []
-        if df.empty:
+        if eng_df.empty:
             return events
         lookup: UtilizationLookup = utilization_lookup or {}
 
-        seg_indices = df.groupby("event_cum").indices
-        smooth_values = df["float_value_smooth_custom"].to_numpy()
-        time_values = df["flight_datetime"].to_numpy()
-        event_values = df["event"].to_numpy()
+        seg_indices = eng_df.groupby("event_cum").indices
+        smooth_values = eng_df["float_value_smooth_custom"]
+        time_values = eng_df["flight_datetime"]
         cart = parameter.direction
-        max_seg = int(df["event_cum"].max())  # pyright: ignore[reportArgumentType]
+        max_seg = eng_df["event_cum"].max()
 
         for seg in range(1, max_seg + 1):
             prev_idx = seg_indices.get(seg - 1)
             curr_idx = seg_indices.get(seg)
+
             if (
                 prev_idx is None
                 or curr_idx is None
@@ -302,17 +297,12 @@ class WashCalculator:
             )
 
             # Maint metadata sits on the first flight of the segment (the anchor row)
-            anchor_local = np.where(event_values[curr_idx] == 1)[0]
+            maint_anchor_row = eng_df.query('not ata_code.isna() and event_cum == @seg').iloc[0]
             maint_dt = None
             ata = None
-            if len(anchor_local):
-                anchor_row = df.iloc[curr_idx[anchor_local[0]]]
-                mdt_raw = anchor_row["maint_datetime"]
-                if isinstance(mdt_raw, pd.Timestamp):
-                    maint_dt = mdt_raw.to_pydatetime()
-                ata_raw = anchor_row["ata_code"]
-                if pd.notna(ata_raw):
-                    ata = ata_raw
+            if maint_anchor_row is not None:
+                maint_dt = maint_anchor_row["maint_datetime"].to_pydatetime()
+                ata = maint_anchor_row["ata_code"]
 
             time_loe_dt: datetime | None = (
                 time_loe.to_pydatetime() if time_loe is not None else None
