@@ -123,6 +123,83 @@ def _label_row(e: rx.Var) -> rx.Component:
     )
 
 
+def _param_group(title: str, options: rx.Var) -> rx.Component:
+    return rx.vstack(
+        rx.text(title, size="1", weight="medium", color="var(--gray-10)"),
+        rx.foreach(
+            options,
+            lambda it: rx.checkbox(
+                it["label"],
+                checked=EgtState.selected_params.contains(it["id"]),
+                on_change=EgtState.toggle_param(it["id"]),
+                size="1",
+            ),
+        ),
+        spacing="1",
+        align="start",
+        width="100%",
+    )
+
+
+def _param_selector() -> rx.Component:
+    """Collapsible: pick which parameters get a chart row, grouped by phase."""
+    return rx.vstack(
+        rx.hstack(
+            rx.icon(
+                rx.cond(EgtState.params_open, "chevron-down", "chevron-right"),
+                size=14,
+            ),
+            rx.text("Chart parameters", size="2", weight="medium"),
+            rx.spacer(),
+            rx.badge(EgtState.selected_params.length().to_string()),
+            on_click=EgtState.toggle_params_open,
+            cursor="pointer",
+            align="center",
+            width="100%",
+        ),
+        rx.cond(
+            EgtState.params_open,
+            rx.vstack(
+                rx.hstack(
+                    rx.input(
+                        placeholder="Search parameters…",
+                        value=EgtState.param_search,
+                        on_change=EgtState.set_param_search,
+                        size="1",
+                        width="100%",
+                    ),
+                    rx.button(
+                        "Reset",
+                        on_click=EgtState.reset_params,
+                        size="1",
+                        variant="ghost",
+                    ),
+                    spacing="2",
+                    align="center",
+                    width="100%",
+                ),
+                rx.scroll_area(
+                    rx.vstack(
+                        _param_group("Takeoff", EgtState.takeoff_param_options),
+                        _param_group("Cruise", EgtState.cruise_param_options),
+                        spacing="3",
+                        align="stretch",
+                        width="100%",
+                    ),
+                    max_height="260px",
+                    width="100%",
+                ),
+                spacing="2",
+                align="stretch",
+                width="100%",
+            ),
+        ),
+        spacing="2",
+        align="stretch",
+        width="100%",
+    )
+
+
 def _version_selector() -> rx.Component:
     return rx.vstack(
         rx.text("Dataset version", size="2", weight="medium"),
@@ -252,6 +329,7 @@ def _control_panel() -> rx.Component:
         rx.heading("Controls", size="4"),
         date_range_picker(),
         _model_params(),
+        _param_selector(),
         _version_selector(),
         rx.cond(
             EgtState.selected_version == "working",
@@ -308,7 +386,7 @@ def _results_panel() -> rx.Component:
                 data=EgtState.chart_figure,
                 on_selected=EgtState.on_plot_selected,
                 width="100%",
-                height="720px",
+                height=EgtState.chart_height,
             ),
             rx.callout(
                 "Select an engine to see its EGT failure prediction.",

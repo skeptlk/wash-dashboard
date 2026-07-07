@@ -129,6 +129,15 @@ dataset and updates the DVC pointers.
 - `manual_spans_for(engine_id, start, end) -> [(start, end, value)]` — for chart shading.
 - `export_curated() -> {rows, overridden, path}` / `dvc_add() -> (ok, output)`.
 
+**Chart parameters** (`data/egt_params.py`, `pages/egt.py:_param_selector()`,
+`state/egt.py:EgtState`): a collapsible **Chart parameters** section chooses which
+parameters get a subplot row (default EGTHDM takeoff + DEGT/GWFM cruise, matching the old
+hardcoded view). The catalog is every measurement column of the B737 takeoff/cruise parquet
+(meta columns excluded); a parameter is keyed `NAME@PHASE` since some exist in both phases
+(e.g. EGTHDM). The selector is a searchable checkbox list grouped **Takeoff / Cruise**; the
+heuristic failure overlay stays tied to `EGTHDM@TAKEOFF`. Chart + container height scale with
+the row count (`EgtState.chart_height`).
+
 **EGT page controls & state** (`pages/egt.py` `_labeling_panel()`, `state/egt.py:EgtState`):
 - `label_mode` switch toggles the labeling panel and the chart's plotly `dragmode`
   (`select` ↔ `zoom`); rebuilds the chart so the mode change takes effect.

@@ -13,12 +13,13 @@ import plotly.graph_objects as go
 import reflex as rx
 from plotly.subplots import make_subplots
 
-from enginewash import predict_egt_failure
+from enginewash import FlightPhase, FlightRecord, predict_egt_failure
 
 from ..data import LOADED
+from ..data import egt_params
 from ..data import labels as labels_store
 from ..data import versions as versions_store
-from ..data.derived import PARAMETER_BY_NAME, flights_for, maint_events_for_ata
+from ..data.derived import maint_events_for_ata
 from ..data.egt_indication import (
     EGT_FAILURE_ENGINES,
     EGT_PREDICTION_ENGINES,
@@ -28,10 +29,20 @@ from .base import GlobalState
 
 _AIRCRAFT_TYPE = "B737"
 
-_PARAMS = ["EGTHDM", "DEGT", "GWFM"]
-_PARAM_COLORS = {"EGTHDM": "#1f77b4", "DEGT": "#1f77b4", "GWFM": "#1f77b4"}
+_PARAM_COLOR = "#1f77b4"
 
 _SMOOTH_WINDOW = 30
+
+# Rolling robust-dispersion ("noise") companion bar. IQR is robust to outliers,
+# unlike std. Hypothesis: data gets noisier around a failure.
+_SCATTER_WINDOW = 15
+
+
+def _rolling_scatter(ys: list[float], window: int = _SCATTER_WINDOW) -> list[float]:
+    r = pd.Series(ys, dtype="float64").rolling(
+        window, center=True, min_periods=max(2, window // 3)
+    )
+    return (r.quantile(0.75) - r.quantile(0.25)).tolist()
 
 # Show ATA markers up to this many days before the first flight (context).
 _ATA_GRACE_DAYS = 60
@@ -61,6 +72,11 @@ class EgtState(rx.State):
     egthdm_threshold: float = _DEFAULT_EGTHDM_THRESHOLD
     lookback_cycles: int = _DEFAULT_LOOKBACK_CYCLES
 
+    # Which parameters to plot (catalog ids, one subplot each).
+    selected_params: list[str] = egt_params.DEFAULT_PARAMS
+    param_search: str = ""
+    params_open: bool = False
+
     has_chart: bool = False
     chart_figure: go.Figure = go.Figure()
 
@@ -88,6 +104,57 @@ class EgtState(rx.State):
             e for e in self.available_engines_labeled
             if q in e["label"].lower() or q in e["id"].lower()
         ]
+
+    def _param_catalog(self) -> list[dict]:
+        bundle = LOADED.get(_AIRCRAFT_TYPE)
+        return egt_params.catalog(bundle) if bundle is not None else []
+
+    def _filter_params(self, phase: str) -> list[dict]:
+        q = self.param_search.strip().lower()
+        return [
+            {"id": e["id"], "label": e["name"]}
+            for e in self._param_catalog()
+            if e["phase"] == phase and (not q or q in e["name"].lower())
+        ]
+
+    @rx.var
+    def takeoff_param_options(self) -> list[dict]:
+        return self._filter_params("TAKEOFF")
+
+    @rx.var
+    def cruise_param_options(self) -> list[dict]:
+        return self._filter_params("CRUISE")
+
+    def _selected_entries(self) -> list[dict]:
+        sel = set(self.selected_params)
+        return [e for e in self._param_catalog() if e["id"] in sel]
+
+    @rx.var
+    def chart_height(self) -> str:
+        return f"{max(300, 280 * len(self.selected_params))}px"
+
+    @rx.event
+    def set_param_search(self, value: str):
+        self.param_search = value
+
+    @rx.event
+    def toggle_params_open(self):
+        self.params_open = not self.params_open
+
+    @rx.event
+    async def toggle_param(self, param_id: str, checked: bool):
+        selected = [p for p in self.selected_params if p != param_id]
+        if checked:
+            selected.append(param_id)
+        self.selected_params = selected
+        if self.selected_engine_id:
+            await self._build_chart()
+
+    @rx.event
+    async def reset_params(self):
+        self.selected_params = list(egt_params.DEFAULT_PARAMS)
+        if self.selected_engine_id:
+            await self._build_chart()
 
     def _build_engine_list(self) -> None:
         """Engines that have predictions AND exist in the Boeing bundle.
@@ -295,27 +362,30 @@ class EgtState(rx.State):
         eid = self.selected_engine_id
         label = bundle.engine_labels.get(eid, eid)
 
+        entries = self._selected_entries()
+        if not entries:
+            self.has_chart = False
+            return
+        nrows = len(entries)
+
         # Track the span actually covered by flight data, so out-of-range
         # markers (e.g. an ATA event predating the data) don't stretch the axis.
         data_min: Optional[datetime] = None
         data_max: Optional[datetime] = None
 
+        titles = [f"{e['name']} ({e['phase'].title()})" for e in entries]
         fig = make_subplots(
-            rows=len(_PARAMS),
+            rows=nrows,
             cols=1,
             shared_xaxes=True,
-            vertical_spacing=0.05,
-            subplot_titles=_PARAMS,
+            # Keep spacing valid (plotly caps it at 1/(rows-1)) as row count grows.
+            vertical_spacing=min(0.05, 0.8 / max(1, nrows - 1)),
+            subplot_titles=titles,
         )
 
-        for i, pname in enumerate(_PARAMS, start=1):
-            param = PARAMETER_BY_NAME[pname]
-            color = _PARAM_COLORS[pname]
-            flights = flights_for(bundle, eid, param, start=start, end=end)
-            flights.sort(key=lambda f: f.flight_datetime)
-
-            xs = [f.flight_datetime for f in flights]
-            ys = [f.float_value for f in flights]
+        for i, entry in enumerate(entries, start=1):
+            pname = entry["name"]
+            xs, ys = egt_params.series_for(bundle, eid, entry, start=start, end=end)
 
             if xs:
                 data_min = xs[0] if data_min is None else min(data_min, xs[0])
@@ -340,15 +410,41 @@ class EgtState(rx.State):
                     y=smoothed.tolist(),
                     mode="lines",
                     name=f"{pname} smooth",
-                    line={"color": color, "width": 1.5},
+                    line={"color": _PARAM_COLOR, "width": 1.5},
                     opacity=0.9,
                 ),
                 row=i,
                 col=1,
             )
 
-            # Overlay the simple heuristic model's predicted failures on EGTHDM.
-            if pname == "EGTHDM":
+            # Rolling robust dispersion (noise proxy) as bars on the same axis,
+            # baseline-shifted to sit just under the data so it's readable.
+            scatter = _rolling_scatter(ys)
+            base = min((v for v in ys if v == v), default=0.0)
+            fig.add_trace(
+                go.Bar(
+                    x=xs,
+                    y=scatter,
+                    base=base,
+                    name=f"{pname} noise (IQR {_SCATTER_WINDOW})",
+                    marker={"color": "#ff7f0e", "opacity": 1, "line": {"width": 0}},
+                ),
+                row=i,
+                col=1,
+            )
+
+            # Overlay the simple heuristic model's predicted failures on takeoff EGTHDM.
+            if entry["id"] == egt_params.EGTHDM_TAKEOFF_ID:
+                flights = [
+                    FlightRecord(
+                        engine_id=eid,
+                        flight_datetime=x,
+                        parameter_name="EGTHDM",
+                        flight_phase=FlightPhase.TAKEOFF,
+                        float_value=float(y),
+                    )
+                    for x, y in zip(xs, ys)
+                ]
                 predictions = predict_egt_failure(
                     eid,
                     flights,
@@ -392,7 +488,6 @@ class EgtState(rx.State):
                 textangle=-90,
             )
 
-        nrows = len(_PARAMS)
         if self.selected_version == "working":
             # Live view: auto baseline (light red) + editable manual overlay.
             for s, e in failure_spans_for(eid, start=start, end=end):
@@ -433,7 +528,7 @@ class EgtState(rx.State):
         fig.update_layout(
             title=title,
             margin={"l": 50, "r": 10, "t": 50, "b": 30},
-            height=840,
+            height=max(300, 280 * nrows),
             showlegend=True,
             dragmode="select" if self.label_mode else "zoom",
         )
