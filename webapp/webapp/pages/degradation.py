@@ -39,6 +39,21 @@ def _control_panel() -> rx.Component:
             align="stretch",
             width="100%",
         ),
+        rx.vstack(
+            rx.text("Chart x-axis", size="2", weight="medium"),
+            rx.segmented_control.root(
+                rx.segmented_control.item("Date", value="date"),
+                rx.segmented_control.item("Cycles", value="cycles"),
+                rx.segmented_control.item("Hours", value="hours"),
+                value=DegradationState.x_axis_mode,
+                on_change=DegradationState.set_x_axis_mode,
+                size="1",
+                width="100%",
+            ),
+            spacing="1",
+            align="stretch",
+            width="100%",
+        ),
         rx.button(
             rx.cond(DegradationState.is_computing, rx.spinner(size="2"), rx.icon("play", size=16)),
             "Recompute",
@@ -91,6 +106,8 @@ def _ranked_table_row(row: rx.Var) -> rx.Component:
     return rx.table.row(
         rx.table.cell(row["label"]),
         rx.table.cell(row["slope_per_year"], background_color=_slope_bg(row)),
+        rx.table.cell(row["rate_per_1000_cycles"]),
+        rx.table.cell(row["rate_per_1000_hours"]),
         rx.table.cell(row["r_squared"]),
         rx.table.cell(row["n_points"]),
         rx.table.cell(row["start"]),
@@ -138,6 +155,8 @@ def _ranked_table() -> rx.Component:
                     rx.table.row(
                         _sortable_header("Engine", "label"),
                         _sortable_header("°C / yr", "slope_per_year"),
+                        _sortable_header("°C / 1000 cyc", "rate_per_1000_cycles"),
+                        _sortable_header("°C / 1000 hr", "rate_per_1000_hours"),
                         _sortable_header("r²", "r_squared"),
                         _sortable_header("n", "n_points"),
                         _sortable_header("Start", "start"),

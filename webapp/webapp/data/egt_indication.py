@@ -71,26 +71,21 @@ def _load() -> None:
     EGT_PREDICTION_ENGINES = sorted(_BY_ENGINE.keys())
 
 
-def failure_spans_for(
-    engine_id: str,
+def merge_failure_spans(
+    times: list,
+    flags: list,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
 ) -> list[tuple[datetime, datetime]]:
-    """Contiguous time spans where the engine is predicted to be failing.
+    """Collapse per-flight failure flags into contiguous shading spans.
 
-    Each failing flight shades from its own timestamp until the next flight
-    (failing or not); contiguous runs merge into a single span. The trailing
-    failing flight extends one day so a final isolated point stays visible.
-    Optionally clipped to ``[start, end]``.
+    ``times`` are time-sorted flight timestamps and ``flags`` the parallel 0/1
+    failure flags. Each failing flight shades from its own timestamp until the
+    next flight (failing or not); contiguous runs merge into a single span. The
+    trailing failing flight extends one day so a final isolated point stays
+    visible. Optionally clipped to ``[start, end]``.
     """
-    g = _BY_ENGINE.get(engine_id)
-    if g is None or g.empty:
-        return []
-
-    times = g["flight_datetime"].tolist()
-    flags = g["failure"].tolist()
     n = len(times)
-
     spans: list[tuple[datetime, datetime]] = []
     for i, t in enumerate(times):
         if flags[i] != 1:
@@ -118,6 +113,24 @@ def failure_spans_for(
             continue
         clipped.append((max(s, start) if start else s, min(e, end) if end else e))
     return clipped
+
+
+def failure_spans_for(
+    engine_id: str,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+) -> list[tuple[datetime, datetime]]:
+    """Contiguous time spans where the engine is predicted to be failing.
+
+    Thin wrapper over :func:`merge_failure_spans` using the auto-baseline
+    per-flight frame. Optionally clipped to ``[start, end]``.
+    """
+    g = _BY_ENGINE.get(engine_id)
+    if g is None or g.empty:
+        return []
+    return merge_failure_spans(
+        g["flight_datetime"].tolist(), g["failure"].tolist(), start, end
+    )
 
 
 _load()

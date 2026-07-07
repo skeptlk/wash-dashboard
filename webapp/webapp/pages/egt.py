@@ -123,6 +123,36 @@ def _label_row(e: rx.Var) -> rx.Component:
     )
 
 
+def _version_selector() -> rx.Component:
+    return rx.vstack(
+        rx.text("Dataset version", size="2", weight="medium"),
+        rx.select.root(
+            rx.select.trigger(width="100%"),
+            rx.select.content(
+                rx.foreach(
+                    EgtState.version_options,
+                    lambda o: rx.select.item(o["label"], value=o["value"]),
+                ),
+            ),
+            value=EgtState.selected_version,
+            on_change=EgtState.set_version,
+            size="1",
+            width="100%",
+        ),
+        rx.cond(
+            EgtState.selected_version != "working",
+            rx.text(
+                "Read-only snapshot — switch to Working (live) to edit labels.",
+                size="1",
+                color="var(--gray-10)",
+            ),
+        ),
+        spacing="1",
+        align="stretch",
+        width="100%",
+    )
+
+
 def _labeling_panel() -> rx.Component:
     return rx.vstack(
         rx.hstack(
@@ -222,7 +252,11 @@ def _control_panel() -> rx.Component:
         rx.heading("Controls", size="4"),
         date_range_picker(),
         _model_params(),
-        _labeling_panel(),
+        _version_selector(),
+        rx.cond(
+            EgtState.selected_version == "working",
+            _labeling_panel(),
+        ),
         rx.vstack(
             rx.text("Engine", size="2", weight="medium"),
             rx.input(
@@ -259,6 +293,15 @@ def _control_panel() -> rx.Component:
 
 def _results_panel() -> rx.Component:
     return rx.vstack(
+        rx.cond(
+            EgtState.version_error != "",
+            rx.callout(
+                EgtState.version_error,
+                icon="triangle_alert",
+                color_scheme="red",
+                width="100%",
+            ),
+        ),
         rx.cond(
             EgtState.has_chart,
             rx.plotly(

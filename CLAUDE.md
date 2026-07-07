@@ -143,6 +143,24 @@ dataset and updates the DVC pointers.
 - Chart overlay: auto failure spans stay light-red; manual corrections are drawn on top —
   green outline for `failure=0` (cleared), red outline for `failure=1`.
 
+**Dataset version selector** (`data/versions.py`, `pages/egt.py:_version_selector()`,
+`state/egt.py:EgtState`): a **Dataset version** dropdown lets you view past labeled
+snapshots read-only. A "version" is a **git commit that changed
+`data/egt_indication_curated.parquet.dvc`** — so a new version appears in the dropdown only
+after you `git commit` the pointer (the app never commits/pushes). DVC has no auto-latest.
+- `"Working (live)"` (default) = the editable view above (auto baseline + manual overlay,
+  labeling panel shown).
+- Any other entry = a committed snapshot: failure spans are shaded from that version's
+  `failure_value` column (red outline), the labeling panel is **hidden**, and `label_mode`
+  is forced off. Switch back to Working (live) to edit.
+- `versions.py`: `list_versions()` (git log on the pointer, newest first),
+  `failure_spans_for_version(sha, engine_id, start, end)` — loads the curated parquet at the
+  git rev via `dvc.api.open(..., rev=sha)` (cached per sha), collapses `failure_value` to a
+  per-flight flag, and reuses `egt_indication.merge_failure_spans` (extracted from
+  `failure_spans_for`). Loading a version whose blob isn't in the local DVC cache pulls from
+  the S3 remote; if that fails (e.g. the known bad write keys) the error surfaces as a red
+  callout and the chart still renders its traces.
+
 **Cross-parameter matching:** a label range matches by **exact timestamp**. EGTHDM
 (takeoff phase) and DEGT/GWFM (cruise phase) have *different* `flight_datetime` per logical
 flight, so each parameter's points are matched independently — every row of any parameter

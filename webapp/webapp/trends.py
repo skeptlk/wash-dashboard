@@ -144,6 +144,120 @@ def compute_lifetime_trend(
 
 
 @dataclass(frozen=True)
+class UtilizationTrend:
+    """Degradation of a parameter against engine utilization (cycles / hours).
+
+    Mirrors the per-1000-cycles / per-1000-hours rate from the degradation study
+    notebook. Each parameter reading is matched to the latest preceding TAC/TAH,
+    the series is split into continuous-utilization segments (gaps, TAC/TAH resets,
+    aircraft swaps), a linear OLS is fit per qualifying segment against cumulative
+    cycles and hours, and the per-segment slopes are span-weighted-averaged.
+
+    Attributes:
+        engine_id: Engine identifier.
+        parameter_name: Parameter that was fit.
+        rate_per_1000_cycles: Span-weighted slope in parameter-units per 1000 cycles.
+            NaN when no segment had enough utilization span to fit.
+        rate_per_1000_hours: Span-weighted slope in parameter-units per 1000 hours.
+        n_points: Number of readings that were matched to utilization.
+    """
+
+    engine_id: str
+    parameter_name: str
+    rate_per_1000_cycles: float
+    rate_per_1000_hours: float
+    n_points: int
+
+
+def _ols_slope(x: np.ndarray, y: np.ndarray) -> float:
+    """Least-squares slope of ``y ~ x``. Caller must pass ≥2 distinct x values."""
+    return float(np.polyfit(x, y, 1)[0])
+
+
+def compute_utilization_trend(
+    engine_id: str,
+    parameter_name: str,
+    datetimes: list[datetime],
+    values: np.ndarray,
+    cycles: np.ndarray,
+    hours: np.ndarray,
+    aircraft_ids: np.ndarray,
+    gap_days: float = 30.0,
+    min_flights: int = 30,
+    min_cycles: float = 100.0,
+) -> UtilizationTrend:
+    """Fit per-1000-cycles / per-1000-hours degradation for one engine.
+
+    Inputs are aligned, single-engine sequences where each parameter reading in
+    ``values`` has already been matched to cumulative ``cycles`` / ``hours`` and the
+    ``aircraft_ids`` it was logged on (see ``derived.matched_utilization_for``).
+
+    The series is split into segments wherever consecutive readings are more than
+    ``gap_days`` apart, the cumulative cycles or hours go backwards (a TAC/TAH reset),
+    or the aircraft changes. Segments with fewer than ``min_flights`` readings or less
+    than ``min_cycles`` of cycle span are skipped (too short to fit a meaningful rate).
+    Per-segment slopes are then averaged weighted by each segment's cycle/hour span.
+    """
+    n = len(values)
+    nan_trend = UtilizationTrend(
+        engine_id, parameter_name, float("nan"), float("nan"), n,
+    )
+    if n < 2:
+        return nan_trend
+
+    values = np.asarray(values, dtype=np.float64)
+    cycles = np.asarray(cycles, dtype=np.float64)
+    hours = np.asarray(hours, dtype=np.float64)
+    aircraft_ids = np.asarray(aircraft_ids)
+    times = np.asarray(datetimes, dtype="datetime64[ns]")
+
+    order = np.argsort(times, kind="stable")
+    times, values, cycles, hours, aircraft_ids = (
+        times[order], values[order], cycles[order], hours[order], aircraft_ids[order]
+    )
+
+    # Segment on flight gaps (>gap_days), utilization resets, and aircraft swaps.
+    gaps = np.diff(times) / np.timedelta64(1, "D")
+    split = np.zeros(n, dtype=bool)
+    split[1:] = (
+        (gaps > gap_days)
+        | (cycles[1:] < cycles[:-1])
+        | (hours[1:] < hours[:-1])
+        | (aircraft_ids[1:] != aircraft_ids[:-1])
+    )
+    group_id = np.cumsum(split)
+
+    # Fit each axis (cumulative cycles, hours) per segment, weighting by its span.
+    # The span filters guarantee ≥2 distinct x, so every kept segment yields a slope.
+    slopes_c, weights_c = [], []
+    slopes_h, weights_h = [], []
+    for g in np.unique(group_id):
+        idx = group_id == g
+        if int(idx.sum()) < min_flights:
+            continue
+        cy, hr, vl = cycles[idx], hours[idx], values[idx]
+        cycle_span = float(cy.max() - cy.min())
+        hour_span = float(hr.max() - hr.min())
+        if cycle_span < min_cycles or hour_span <= 0:
+            continue
+        slopes_c.append(_ols_slope(cy - cy.min(), vl) * 1000.0)
+        weights_c.append(cycle_span)
+        slopes_h.append(_ols_slope(hr - hr.min(), vl) * 1000.0)
+        weights_h.append(hour_span)
+
+    if not slopes_c:
+        return nan_trend
+
+    return UtilizationTrend(
+        engine_id=engine_id,
+        parameter_name=parameter_name,
+        rate_per_1000_cycles=float(np.average(slopes_c, weights=weights_c)),
+        rate_per_1000_hours=float(np.average(slopes_h, weights=weights_h)),
+        n_points=n,
+    )
+
+
+@dataclass(frozen=True)
 class GroupTrend:
     """Per-segment trend within an engine's series, split by gaps in flight dates.
 

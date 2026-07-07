@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from enginewash import (
@@ -64,6 +65,73 @@ def flights_for(
         )
         for row in sub.itertuples(index=False)
     ]
+
+
+def matched_utilization_for(
+    bundle: AircraftBundle,
+    engine_id: str,
+    parameter: WashParameter,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    tolerance_hours: int = 12,
+) -> tuple[list[datetime], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Match each parameter reading of one engine to its cumulative TAC/TAH.
+
+    Each flight reading is paired with the latest utilization row whose departure is
+    at-or-before the flight and within ``tolerance_hours`` (backward as-of join, like
+    the degradation study notebook). Returns aligned sequences
+
+        ``(datetimes, values, total_cycles, total_hours, aircraft_id_keys)``
+
+    suitable for ``trends.compute_utilization_trend``. Readings with no utilization
+    match within tolerance are dropped; empty arrays are returned when the engine has
+    no flights or no utilization data.
+    """
+    empty = ([], np.array([]), np.array([]), np.array([]), np.array([]))
+    col, df_attr = _PARAM_SOURCES[parameter.name]
+    fdf: pd.DataFrame = getattr(bundle, df_attr)
+    mask = (fdf["engine_id"] == engine_id) & fdf[col].notna()
+    if start is not None:
+        mask &= fdf["flight_datetime"] >= start
+    if end is not None:
+        mask &= fdf["flight_datetime"] <= end
+    flights = fdf.loc[mask, ["flight_datetime", col]].sort_values("flight_datetime")
+
+    udf = bundle.utilization_df
+    if flights.empty or udf.empty or "aircraft_id_key" not in udf.columns:
+        return empty
+    u = (
+        udf.loc[
+            udf["engine_id"] == engine_id,
+            ["departure_datetime", "total_cycles", "total_hours", "aircraft_id_key"],
+        ]
+        .sort_values("departure_datetime")
+    )
+    if u.empty:
+        return empty
+
+    merged = pd.merge_asof(
+        flights,
+        u,
+        left_on="flight_datetime",
+        right_on="departure_datetime",
+        direction="backward",
+        tolerance=pd.Timedelta(hours=tolerance_hours),
+    ).dropna(subset=["total_cycles", "total_hours", "aircraft_id_key"])
+    if merged.empty:
+        return empty
+
+    datetimes = [
+        ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+        for ts in merged["flight_datetime"]
+    ]
+    return (
+        datetimes,
+        merged[col].to_numpy(dtype=float),
+        merged["total_cycles"].to_numpy(dtype=float),
+        merged["total_hours"].to_numpy(dtype=float),
+        merged["aircraft_id_key"].to_numpy(),
+    )
 
 
 def utilization_for(

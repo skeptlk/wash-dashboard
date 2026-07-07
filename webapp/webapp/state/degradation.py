@@ -6,15 +6,18 @@ import json
 from datetime import datetime
 from typing import Optional
 
+import numpy as np
 import plotly.graph_objects as go
 import reflex as rx
 
 from ..data import LOADED
-from ..data.derived import PARAMETER_BY_NAME, flights_for
+from ..data.derived import PARAMETER_BY_NAME, flights_for, matched_utilization_for
 from ..trends import (
     LifetimeTrend,
+    UtilizationTrend,
     compute_group_trends,
     compute_lifetime_trend,
+    compute_utilization_trend,
     detect_fast_spans,
     rank_engines_by_trend,
 )
@@ -79,12 +82,27 @@ def _trend_to_row(t: LifetimeTrend, label: str) -> dict:
     }
 
 
+def _util_fields(ut: Optional[UtilizationTrend]) -> dict:
+    """Cycle/hour degradation columns; None (renders blank) when unavailable."""
+    def _clean(v: float) -> Optional[float]:
+        return None if v != v else round(v, 2)  # v != v is True for NaN
+
+    if ut is None:
+        return {"rate_per_1000_cycles": None, "rate_per_1000_hours": None}
+    return {
+        "rate_per_1000_cycles": _clean(ut.rate_per_1000_cycles),
+        "rate_per_1000_hours": _clean(ut.rate_per_1000_hours),
+    }
+
+
 class DegradationState(rx.State):
     """Per-page state for the Degradation view."""
 
     # Persisted across visits (see GlobalState for the LocalStorage rationale).
     selected_parameter: str = rx.LocalStorage("EGTHDM", name="ew_deg_param", sync=True)
     selected_engine_id: str = rx.LocalStorage("", name="ew_deg_engine", sync=True)
+    # Chart x-axis: "date" | "cycles" | "hours".
+    x_axis_mode: str = rx.LocalStorage("date", name="ew_deg_xaxis", sync=True)
     engine_search: str = ""
     normal_rate: float = -3.86
     # JSON-serialized mirror of normal_rate (LocalStorage is string-only).
@@ -178,6 +196,7 @@ class DegradationState(rx.State):
         end = _parse_date(gs.end_date)
 
         trends: list[LifetimeTrend] = []
+        util_trends: dict[str, UtilizationTrend] = {}
         labels: dict[str, str] = {}
         for bundle in bundles:
             labels.update(bundle.engine_labels)
@@ -186,10 +205,20 @@ class DegradationState(rx.State):
                 if len(flights) < 2:
                     continue
                 trends.append(compute_lifetime_trend(flights, parameter))
+                matched = matched_utilization_for(
+                    bundle, engine_id, parameter, start=start, end=end
+                )
+                util_trends[engine_id] = compute_utilization_trend(
+                    engine_id, parameter.name, *matched
+                )
 
         ranked = rank_engines_by_trend(trends, parameter.trend_direction)
         self.ranked_rows = [
-            _trend_to_row(t, labels.get(t.engine_id, t.engine_id)) for t in ranked
+            {
+                **_trend_to_row(t, labels.get(t.engine_id, t.engine_id)),
+                **_util_fields(util_trends.get(t.engine_id)),
+            }
+            for t in ranked
         ]
         self.has_results = True
         self.is_computing = False
@@ -200,6 +229,19 @@ class DegradationState(rx.State):
             bundle = _bundle_for_engine(gs.aircraft_types, self.selected_engine_id)
             if bundle is not None:
                 self._update_chart(bundle, parameter, start, end)
+
+    @rx.event
+    async def set_x_axis_mode(self, value: str | list[str]):
+        # rx.segmented_control passes str (single-select); tolerate list too.
+        self.x_axis_mode = value[0] if isinstance(value, list) else value
+        if not self.selected_engine_id:
+            return
+        gs = await self.get_state(GlobalState)
+        bundle = _bundle_for_engine(gs.aircraft_types, self.selected_engine_id)
+        if bundle is None:
+            return
+        parameter = PARAMETER_BY_NAME[self.selected_parameter]
+        self._update_chart(bundle, parameter, _parse_date(gs.start_date), _parse_date(gs.end_date))
 
     @rx.event
     async def select_engine(self, engine_id: str):
@@ -228,10 +270,33 @@ class DegradationState(rx.State):
             smooth_window=_SMOOTH_WINDOW,
         )
 
+        # X-axis mode: map flight datetimes → cumulative cycles/hours via the same
+        # backward as-of match used for the rate table. Falls back to datetime when
+        # the engine has no utilization data. interp tolerates dropped/unmatched
+        # readings and reset edges well enough for a view toggle.
+        mode = self.x_axis_mode
+        mu_dt, _v, mu_cyc, mu_hr, _ac = matched_utilization_for(
+            bundle, self.selected_engine_id, parameter, start=start, end=end
+        )
+        use_util = mode in ("cycles", "hours") and len(mu_dt) >= 2
+        if use_util:
+            mu_x = np.asarray([d.timestamp() for d in mu_dt], dtype=float)
+            mu_y = np.asarray(mu_cyc if mode == "cycles" else mu_hr, dtype=float)
+            order = np.argsort(mu_x)
+            mu_x, mu_y = mu_x[order], mu_y[order]
+
+            def x_of(dts):
+                return np.interp(
+                    np.asarray([d.timestamp() for d in dts], dtype=float), mu_x, mu_y
+                )
+        else:
+            def x_of(dts):
+                return list(dts)
+
         # Raw points (faint) so the underlying data stays visible behind the segments.
         flights.sort(key=lambda f: f.flight_datetime)
         fig.add_trace(go.Scattergl(
-            x=[f.flight_datetime for f in flights],
+            x=x_of([f.flight_datetime for f in flights]),
             y=[f.float_value for f in flights],
             mode="markers",
             name=parameter.name,
@@ -247,7 +312,7 @@ class DegradationState(rx.State):
         for g in groups:
             color = _GROUP_COLORS[g.group_id % len(_GROUP_COLORS)]
             fig.add_trace(go.Scatter(
-                x=list(g.xs),
+                x=x_of(list(g.xs)),
                 y=list(g.smoothed),
                 mode="lines",
                 name=f"g{g.group_id} smooth ({g.n_points})",
@@ -257,7 +322,7 @@ class DegradationState(rx.State):
             if g.fitted_endpoints:
                 rate_yr = g.slope_per_day * 365.0
                 fig.add_trace(go.Scatter(
-                    x=[p.flight_datetime for p in g.fitted_endpoints],
+                    x=x_of([p.flight_datetime for p in g.fitted_endpoints]),
                     y=[p.value for p in g.fitted_endpoints],
                     mode="lines",
                     name=f"g{g.group_id}: {rate_yr:+.1f}/yr",
@@ -271,9 +336,10 @@ class DegradationState(rx.State):
                 window_days=_FAST_WINDOW_DAYS,
                 min_span_days=_FAST_MIN_SPAN_DAYS,
             ):
+                x0, x1 = x_of([span.start_datetime, span.end_datetime])
                 fig.add_vrect(
-                    x0=span.start_datetime,
-                    x1=span.end_datetime,
+                    x0=x0,
+                    x1=x1,
                     fillcolor="red",
                     opacity=0.12,
                     layer="below",
@@ -290,10 +356,14 @@ class DegradationState(rx.State):
             if overall.r_squared == overall.r_squared
             else ""
         )
+        xaxis_title = {"cycles": "Cumulative cycles", "hours": "Cumulative hours"}.get(
+            mode if use_util else "date", ""
+        )
         fig.update_layout(
             title=f"{label} — {parameter.name} slope {slope_str} {r2_str}",
             margin={"l": 50, "r": 20, "t": 50, "b": 40},
             height=480,
             showlegend=True,
+            xaxis_title=xaxis_title,
         )
         self.chart_figure = fig

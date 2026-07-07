@@ -17,6 +17,7 @@ from enginewash import predict_egt_failure
 
 from ..data import LOADED
 from ..data import labels as labels_store
+from ..data import versions as versions_store
 from ..data.derived import PARAMETER_BY_NAME, flights_for, maint_events_for_ata
 from ..data.egt_indication import (
     EGT_FAILURE_ENGINES,
@@ -70,6 +71,13 @@ class EgtState(rx.State):
     label_value: int = 1  # 0 = no failure, 1 = failure
     manual_labels: list[dict] = []  # overlay rows for the selected engine
     export_status: str = ""
+
+    # --- Dataset version selection ---
+    # "working" = live auto baseline + editable overlay; otherwise a git sha of a
+    # committed curated snapshot, shown read-only.
+    selected_version: str = "working"
+    version_options: list[dict] = []  # [{"value", "label"}], incl. "Working (live)"
+    version_error: str = ""
 
     @rx.var
     def filtered_engines(self) -> list[dict]:
@@ -135,9 +143,30 @@ class EgtState(rx.State):
         if self.selected_engine_id:
             await self._build_chart()
 
+    def _refresh_versions(self) -> None:
+        """Rebuild the version dropdown: Working (live) + committed snapshots."""
+        opts = [{"value": "working", "label": "Working (live)"}]
+        for v in versions_store.list_versions():
+            opts.append({"value": v["sha"], "label": v["label"]})
+        self.version_options = opts
+        # If the selected version vanished (e.g. history rewritten), fall back.
+        if all(o["value"] != self.selected_version for o in opts):
+            self.selected_version = "working"
+
+    @rx.event
+    async def set_version(self, value: str):
+        self.selected_version = value or "working"
+        self.version_error = ""
+        if self.selected_version != "working":
+            # Past versions are read-only; leave label mode off.
+            self.label_mode = False
+        if self.selected_engine_id:
+            await self._build_chart()
+
     @rx.event
     async def on_load(self):
         self._build_engine_list()
+        self._refresh_versions()
         if self.available_engines_labeled and (
             not self.selected_engine_id
             or all(e["id"] != self.selected_engine_id for e in self.available_engines_labeled)
@@ -363,39 +392,46 @@ class EgtState(rx.State):
                 textangle=-90,
             )
 
-        # Shade predicted-failure spans (auto model) across every parameter row.
-        for s, e in failure_spans_for(eid, start=start, end=end):
-            for i in range(1, len(_PARAMS) + 1):
-                fig.add_vrect(
-                    x0=s,
-                    x1=e,
-                    fillcolor="red",
-                    opacity=0.15,
-                    layer="below",
-                    line_width=0,
-                    row=i,
-                    col=1,
+        nrows = len(_PARAMS)
+        if self.selected_version == "working":
+            # Live view: auto baseline (light red) + editable manual overlay.
+            for s, e in failure_spans_for(eid, start=start, end=end):
+                for i in range(1, nrows + 1):
+                    fig.add_vrect(
+                        x0=s, x1=e, fillcolor="red", opacity=0.15,
+                        layer="below", line_width=0, row=i, col=1,
+                    )
+            # Manual labels, distinct from auto spans:
+            # green = cleared (failure 0), solid red outline = failure 1.
+            for s, e, val in labels_store.manual_spans_for(eid, start=start, end=end):
+                color = "#d62728" if val == 1 else "#2ca02c"
+                for i in range(1, nrows + 1):
+                    fig.add_vrect(
+                        x0=s, x1=e, fillcolor=color, opacity=0.22,
+                        layer="below", line_width=1, line_color=color, row=i, col=1,
+                    )
+        else:
+            # Read-only past version: shade from the snapshot's failure_value.
+            try:
+                spans = versions_store.failure_spans_for_version(
+                    self.selected_version, eid, start=start, end=end
                 )
+            except RuntimeError as exc:
+                self.version_error = str(exc)
+                spans = []
+            for s, e in spans:
+                for i in range(1, nrows + 1):
+                    fig.add_vrect(
+                        x0=s, x1=e, fillcolor="red", opacity=0.15,
+                        layer="below", line_width=1, line_color="#d62728",
+                        row=i, col=1,
+                    )
 
-        # Overlay the user's manual labels, distinct from the auto spans:
-        # green = cleared (failure 0), solid red outline = failure 1.
-        for s, e, val in labels_store.manual_spans_for(eid, start=start, end=end):
-            color = "#d62728" if val == 1 else "#2ca02c"
-            for i in range(1, len(_PARAMS) + 1):
-                fig.add_vrect(
-                    x0=s,
-                    x1=e,
-                    fillcolor=color,
-                    opacity=0.22,
-                    layer="below",
-                    line_width=1,
-                    line_color=color,
-                    row=i,
-                    col=1,
-                )
-
+        title = f"{label} — EGT probe failure prediction"
+        if self.selected_version != "working":
+            title += f"  ·  version {self.selected_version[:7]}"
         fig.update_layout(
-            title=f"{label} — EGT probe failure prediction",
+            title=title,
             margin={"l": 50, "r": 10, "t": 50, "b": 30},
             height=840,
             showlegend=True,
