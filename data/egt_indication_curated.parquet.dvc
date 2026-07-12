@@ -1,5 +1,5 @@
 outs:
-- md5: edf0c270c74a714163e40e8ad705355d
-  size: 2601084
+- md5: 1774b1bd810fe9c7f8b40fa84bfe03df
+  size: 2601231
   hash: md5
   path: egt_indication_curated.parquet
