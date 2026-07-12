@@ -141,6 +141,19 @@ def _param_group(title: str, options: rx.Var) -> rx.Component:
     )
 
 
+def _iqr_toggle() -> rx.Component:
+    return rx.hstack(
+        rx.text("Show IQR noise bars", size="2", weight="medium"),
+        rx.spacer(),
+        rx.switch(
+            checked=EgtState.show_iqr,
+            on_change=EgtState.toggle_show_iqr,
+        ),
+        align="center",
+        width="100%",
+    )
+
+
 def _param_selector() -> rx.Component:
     """Collapsible: pick which parameters get a chart row, grouped by phase."""
     return rx.vstack(
@@ -329,6 +342,7 @@ def _control_panel() -> rx.Component:
         rx.heading("Controls", size="4"),
         date_range_picker(),
         _model_params(),
+        _iqr_toggle(),
         _param_selector(),
         _version_selector(),
         rx.cond(

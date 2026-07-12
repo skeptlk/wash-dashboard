@@ -187,6 +187,31 @@ def maint_events_for_ata(
     return result
 
 
+def install_removal_events_for(
+    bundle: AircraftBundle, engine_id: str
+) -> list[tuple[datetime, str, Optional[str]]]:
+    """Return (event_datetime, kind, reason) pairs from the engine's onwing history.
+
+    ``kind`` is "Install" or "Removal"; ``reason`` is the removal reason when present
+    (None for installs and reason-less removals).
+    """
+    df = bundle.onwing_df
+    sub = df.loc[
+        df["engine_id"] == engine_id,
+        ["install_datetime", "removal_datetime", "reason_for_removal"],
+    ]
+    events: list[tuple[datetime, str, Optional[str]]] = []
+    for row in sub.itertuples(index=False):
+        inst = pd.to_datetime(row.install_datetime, errors="coerce")
+        if pd.notna(inst):
+            events.append((inst.to_pydatetime(), "Install", None))
+        rem = pd.to_datetime(row.removal_datetime, errors="coerce")
+        if pd.notna(rem):
+            reason = row.reason_for_removal if pd.notna(row.reason_for_removal) else None
+            events.append((rem.to_pydatetime(), "Removal", reason))
+    return events
+
+
 def maint_for(bundle: AircraftBundle, engine_id: str) -> list[MaintenanceRecord]:
     """Build a list of MaintenanceRecord for one engine from wash_maint.
     """

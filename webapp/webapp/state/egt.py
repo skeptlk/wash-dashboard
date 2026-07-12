@@ -19,7 +19,7 @@ from ..data import LOADED
 from ..data import egt_params
 from ..data import labels as labels_store
 from ..data import versions as versions_store
-from ..data.derived import maint_events_for_ata
+from ..data.derived import install_removal_events_for, maint_events_for_ata
 from ..data.egt_indication import (
     EGT_FAILURE_ENGINES,
     EGT_PREDICTION_ENGINES,
@@ -76,6 +76,7 @@ class EgtState(rx.State):
     selected_params: list[str] = egt_params.DEFAULT_PARAMS
     param_search: str = ""
     params_open: bool = False
+    show_iqr: bool = True
 
     has_chart: bool = False
     chart_figure: go.Figure = go.Figure()
@@ -131,7 +132,7 @@ class EgtState(rx.State):
 
     @rx.var
     def chart_height(self) -> str:
-        return f"{max(300, 280 * len(self.selected_params))}px"
+        return "100vh"
 
     @rx.event
     def set_param_search(self, value: str):
@@ -140,6 +141,11 @@ class EgtState(rx.State):
     @rx.event
     def toggle_params_open(self):
         self.params_open = not self.params_open
+
+    @rx.event
+    async def toggle_show_iqr(self, value: bool):
+        self.show_iqr = value
+        await self._build_chart()
 
     @rx.event
     async def toggle_param(self, param_id: str, checked: bool):
@@ -397,7 +403,9 @@ class EgtState(rx.State):
                     y=ys,
                     mode="markers",
                     name=pname,
-                    marker={"size": 3, "color": "#888", "opacity": 0.25},
+                    marker={"size": 5, "color": "#888", "opacity": 0.45},
+                    selected={"marker": {"size": 9, "opacity": 0.9}},
+                    unselected={"marker": {"opacity": 0.2}},
                 ),
                 row=i,
                 col=1,
@@ -419,19 +427,21 @@ class EgtState(rx.State):
 
             # Rolling robust dispersion (noise proxy) as bars on the same axis,
             # baseline-shifted to sit just under the data so it's readable.
-            scatter = _rolling_scatter(ys)
-            base = min((v for v in ys if v == v), default=0.0)
-            fig.add_trace(
-                go.Bar(
-                    x=xs,
-                    y=scatter,
-                    base=base,
-                    name=f"{pname} noise (IQR {_SCATTER_WINDOW})",
-                    marker={"color": "#ff7f0e", "opacity": 1, "line": {"width": 0}},
-                ),
-                row=i,
-                col=1,
-            )
+            if self.show_iqr:
+                scatter = _rolling_scatter(ys)
+                base = min((v for v in ys if v == v), default=0.0)
+                bar_kwargs = {
+                    "x": xs,
+                    "y": scatter,
+                    "base": base,
+                    "name": f"{pname} noise (IQR {_SCATTER_WINDOW})",
+                    "marker": {"color": "#ff7f0e", "opacity": 0.35, "line": {"width": 0}},
+                }
+                if len(xs) > 1:
+                    gap_ms = pd.Series(xs).diff().dt.total_seconds().median() * 1000
+                    if gap_ms == gap_ms:  # not NaN
+                        bar_kwargs["width"] = gap_ms * 0.5
+                fig.add_trace(go.Bar(**bar_kwargs), row=i, col=1)
 
             # Overlay the simple heuristic model's predicted failures on takeoff EGTHDM.
             if entry["id"] == egt_params.EGTHDM_TAKEOFF_ID:
@@ -488,6 +498,28 @@ class EgtState(rx.State):
                 textangle=-90,
             )
 
+        # Install/removal points from the onwing history, same grace/clip rule as ATA.
+        _EVENT_COLOR = {"Install": "#2ca02c", "Removal": "#d62728"}
+        for dt, kind, reason in sorted(
+            install_removal_events_for(bundle, eid), key=lambda x: x[0]
+        ):
+            if ata_lo is not None and (dt < ata_lo or dt > data_max):
+                continue
+            color = _EVENT_COLOR[kind]
+            fig.add_shape(
+                type="line", x0=dt, x1=dt, y0=0, y1=1,
+                xref="x", yref="paper",
+                line={"color": color, "width": 1.2, "dash": "dashdot"},
+                layer="above",
+            )
+            label = f"{kind}" + (f" ({reason})" if reason else "")
+            fig.add_annotation(
+                x=dt, y=0.01, xref="x", yref="paper",
+                text=label, showarrow=False,
+                font={"size": 8, "color": color}, yanchor="bottom",
+                textangle=-90,
+            )
+
         if self.selected_version == "working":
             # Live view: auto baseline (light red) + editable manual overlay.
             for s, e in failure_spans_for(eid, start=start, end=end):
@@ -528,7 +560,7 @@ class EgtState(rx.State):
         fig.update_layout(
             title=title,
             margin={"l": 50, "r": 10, "t": 50, "b": 30},
-            height=max(300, 280 * nrows),
+            autosize=True,
             showlegend=True,
             dragmode="select" if self.label_mode else "zoom",
         )
