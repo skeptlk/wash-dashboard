@@ -27,8 +27,9 @@ _PHASES = [("TAKEOFF", "takeoff_df"), ("CRUISE", "cruise_df")]
 # The three params shown by default (matches the original hardcoded view).
 DEFAULT_PARAMS = ["EGTHDM@TAKEOFF", "DEGT@CRUISE", "GWFM@CRUISE"]
 
-# The one param that carries the heuristic failure-prediction overlay.
+# The params consumed by the enhanced failure-prediction model.
 EGTHDM_TAKEOFF_ID = "EGTHDM@TAKEOFF"
+DEGT_CRUISE_ID = "DEGT@CRUISE"
 
 _CATALOG_CACHE: dict[int, list[dict]] = {}
 

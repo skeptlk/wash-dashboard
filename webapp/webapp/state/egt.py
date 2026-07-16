@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 import reflex as rx
 from plotly.subplots import make_subplots
 
-from enginewash import FlightPhase, FlightRecord, predict_egt_failure
+from enginewash import FlightPhase, FlightRecord, predict_egt_failure_enhanced
 
 from ..data import LOADED
 from ..data import egt_params
@@ -47,9 +47,21 @@ def _rolling_scatter(ys: list[float], window: int = _SCATTER_WINDOW) -> list[flo
 # Show ATA markers up to this many days before the first flight (context).
 _ATA_GRACE_DAYS = 60
 
-# Defaults for the simple heuristic EGT-failure model.
-_DEFAULT_EGTHDM_THRESHOLD = 10.0
-_DEFAULT_LOOKBACK_CYCLES = 30
+# Defaults for the enhanced (EGTHDM + DEGT + decline) failure model, matching
+# the tuned run in enhanced_baseline.ipynb.
+_DEFAULT_MODEL_PARAMS = {
+    "lookback_cycles": 10,
+    "egthdm_threshold": 4.85,
+    "degt_threshold": 2.70,
+    "smoothing_window": 26,
+    "decline_window_days": 5.0,
+    "decline_min_span_days": 2.0,
+    "decline_min_points": 5,
+    "decline_threshold": 4.0,
+    "decline_min_downward_fraction": 0.75,
+    "decline_min_r2": 0.50,
+}
+_INT_MODEL_PARAMS = {"lookback_cycles", "smoothing_window", "decline_min_points"}
 
 
 def _parse_date(s: str) -> Optional[datetime]:
@@ -68,15 +80,24 @@ class EgtState(rx.State):
     engine_search: str = ""
     available_engines_labeled: list[dict] = []  # [{"id", "label"}]
 
-    # Simple heuristic-model parameters.
-    egthdm_threshold: float = _DEFAULT_EGTHDM_THRESHOLD
-    lookback_cycles: int = _DEFAULT_LOOKBACK_CYCLES
+    # Enhanced model parameters (collapsed "Model parameters" panel).
+    model_params_open: bool = False
+    lookback_cycles: int = _DEFAULT_MODEL_PARAMS["lookback_cycles"]
+    egthdm_threshold: float = _DEFAULT_MODEL_PARAMS["egthdm_threshold"]
+    degt_threshold: float = _DEFAULT_MODEL_PARAMS["degt_threshold"]
+    smoothing_window: int = _DEFAULT_MODEL_PARAMS["smoothing_window"]
+    decline_window_days: float = _DEFAULT_MODEL_PARAMS["decline_window_days"]
+    decline_min_span_days: float = _DEFAULT_MODEL_PARAMS["decline_min_span_days"]
+    decline_min_points: int = _DEFAULT_MODEL_PARAMS["decline_min_points"]
+    decline_threshold: float = _DEFAULT_MODEL_PARAMS["decline_threshold"]
+    decline_min_downward_fraction: float = _DEFAULT_MODEL_PARAMS["decline_min_downward_fraction"]
+    decline_min_r2: float = _DEFAULT_MODEL_PARAMS["decline_min_r2"]
 
     # Which parameters to plot (catalog ids, one subplot each).
     selected_params: list[str] = egt_params.DEFAULT_PARAMS
     param_search: str = ""
     params_open: bool = False
-    show_iqr: bool = True
+    show_iqr: bool = False
 
     has_chart: bool = False
     chart_figure: go.Figure = go.Figure()
@@ -187,7 +208,11 @@ class EgtState(rx.State):
         self.engine_search = value
 
     @rx.event
-    async def set_egthdm_threshold(self, value: str | list):
+    def toggle_model_params_open(self):
+        self.model_params_open = not self.model_params_open
+
+    @rx.event
+    async def set_model_param(self, field: str, value: str | list):
         # Number input hands back a string; slider hands back a [value] list.
         if isinstance(value, list):
             value = value[0] if value else None
@@ -195,24 +220,11 @@ class EgtState(rx.State):
             new_value = float(value)
         except (TypeError, ValueError):
             return
-        if new_value == self.egthdm_threshold:
+        if field in _INT_MODEL_PARAMS:
+            new_value = max(1, int(new_value))
+        if new_value == getattr(self, field):
             return
-        self.egthdm_threshold = new_value
-        if self.selected_engine_id:
-            await self._build_chart()
-
-    @rx.event
-    async def set_lookback_cycles(self, value: str | list):
-        # Number input hands back a string; slider hands back a [value] list.
-        if isinstance(value, list):
-            value = value[0] if value else None
-        try:
-            new_value = max(1, int(float(value)))
-        except (TypeError, ValueError):
-            return
-        if new_value == self.lookback_cycles:
-            return
-        self.lookback_cycles = new_value
+        setattr(self, field, new_value)
         if self.selected_engine_id:
             await self._build_chart()
 
@@ -355,6 +367,51 @@ class EgtState(rx.State):
         else:
             self.export_status = base + f" (dvc add skipped: {out})"
 
+    def _model_predictions(self, bundle, eid: str) -> list[tuple[datetime, float]]:
+        """Enhanced-model predictions over the engine's full history.
+
+        Needs the full EGTHDM/DEGT series (not the user's date-range filter)
+        so the lookback/decline windows have enough history to compare against.
+        """
+        catalog = egt_params.catalog(bundle)
+        egthdm_entry = next((e for e in catalog if e["id"] == egt_params.EGTHDM_TAKEOFF_ID), None)
+        degt_entry = next((e for e in catalog if e["id"] == egt_params.DEGT_CRUISE_ID), None)
+        if egthdm_entry is None:
+            return []
+        ex, ey = egt_params.series_for(bundle, eid, egthdm_entry)
+        dx, dy = egt_params.series_for(bundle, eid, degt_entry) if degt_entry else ([], [])
+        egthdm_records = [
+            FlightRecord(
+                engine_id=eid, flight_datetime=x,
+                parameter_name="EGTHDM", flight_phase=FlightPhase.TAKEOFF,
+                float_value=float(y),
+            )
+            for x, y in zip(ex, ey)
+        ]
+        degt_records = [
+            FlightRecord(
+                engine_id=eid, flight_datetime=x,
+                parameter_name="DEGT", flight_phase=FlightPhase.CRUISE,
+                float_value=float(y),
+            )
+            for x, y in zip(dx, dy)
+        ]
+        return predict_egt_failure_enhanced(
+            eid,
+            egthdm_records,
+            degt_records,
+            lookback_cycles=self.lookback_cycles,
+            egthdm_threshold=self.egthdm_threshold,
+            degt_threshold=self.degt_threshold,
+            smoothing_window=self.smoothing_window,
+            decline_window_days=self.decline_window_days,
+            decline_min_span_days=self.decline_min_span_days,
+            decline_min_points=self.decline_min_points,
+            decline_threshold=self.decline_threshold,
+            decline_min_downward_fraction=self.decline_min_downward_fraction,
+            decline_min_r2=self.decline_min_r2,
+        )
+
     async def _build_chart(self):
         bundle = LOADED.get(_AIRCRAFT_TYPE)
         if bundle is None:
@@ -378,6 +435,12 @@ class EgtState(rx.State):
         # markers (e.g. an ATA event predating the data) don't stretch the axis.
         data_min: Optional[datetime] = None
         data_max: Optional[datetime] = None
+
+        model_predictions = (
+            self._model_predictions(bundle, eid)
+            if any(e["id"] == egt_params.EGTHDM_TAKEOFF_ID for e in entries)
+            else []
+        )
 
         titles = [f"{e['name']} ({e['phase'].title()})" for e in entries]
         fig = make_subplots(
@@ -443,27 +506,14 @@ class EgtState(rx.State):
                         bar_kwargs["width"] = gap_ms * 0.5
                 fig.add_trace(go.Bar(**bar_kwargs), row=i, col=1)
 
-            # Overlay the simple heuristic model's predicted failures on takeoff EGTHDM.
-            if entry["id"] == egt_params.EGTHDM_TAKEOFF_ID:
-                flights = [
-                    FlightRecord(
-                        engine_id=eid,
-                        flight_datetime=x,
-                        parameter_name="EGTHDM",
-                        flight_phase=FlightPhase.TAKEOFF,
-                        float_value=float(y),
-                    )
-                    for x, y in zip(xs, ys)
+            # Overlay the enhanced model's predicted failures on takeoff EGTHDM.
+            if entry["id"] == egt_params.EGTHDM_TAKEOFF_ID and model_predictions:
+                visible = [
+                    (t, v) for t, v in model_predictions
+                    if (start is None or t >= start) and (end is None or t <= end)
                 ]
-                predictions = predict_egt_failure(
-                    eid,
-                    flights,
-                    egthdm_threshold=self.egthdm_threshold,
-                    lookback_cycles=self.lookback_cycles,
-                    smooth_window=_SMOOTH_WINDOW,
-                )
-                if predictions:
-                    px, py = zip(*predictions)
+                if visible:
+                    px, py = zip(*visible)
                     fig.add_trace(
                         go.Scatter(
                             x=list(px),
@@ -564,5 +614,6 @@ class EgtState(rx.State):
             showlegend=True,
             dragmode="select" if self.label_mode else "zoom",
         )
+        fig.update_xaxes(tickformat="%Y-%m-%d", ticks="outside")
         self.chart_figure = fig
         self.has_chart = True

@@ -37,65 +37,62 @@ def _engine_row(e: rx.Var) -> rx.Component:
     )
 
 
+# (field, label, step) for the enhanced model's tunable parameters.
+_MODEL_PARAM_FIELDS = [
+    ("lookback_cycles", "Lookback cycles", 1),
+    ("egthdm_threshold", "EGTHDM threshold", 0.05),
+    ("degt_threshold", "DEGT threshold", 0.05),
+    ("smoothing_window", "Smoothing window", 1),
+    ("decline_window_days", "Decline window (days)", 0.5),
+    ("decline_min_span_days", "Decline min span (days)", 0.5),
+    ("decline_min_points", "Decline min points", 1),
+    ("decline_threshold", "Decline threshold (deg)", 0.1),
+    ("decline_min_downward_fraction", "Decline min downward fraction", 0.05),
+    ("decline_min_r2", "Decline min R²", 0.05),
+]
+
+
+def _model_param_row(field: str, label: str, step: float) -> rx.Component:
+    return rx.hstack(
+        rx.text(label, size="1"),
+        rx.spacer(),
+        rx.input(
+            type="number",
+            value=getattr(EgtState, field),
+            on_change=EgtState.set_model_param(field).debounce(400),
+            step=step,
+            size="1",
+            width="80px",
+        ),
+        align="center",
+        width="100%",
+    )
+
+
 def _model_params() -> rx.Component:
+    """Collapsible: enhanced EGT-failure model parameters."""
     return rx.vstack(
-        rx.text("Model parameters", size="2", weight="medium"),
-        rx.vstack(
-            rx.hstack(
-                rx.text("EGTHDM threshold", size="1"),
-                rx.spacer(),
-                rx.input(
-                    type="number",
-                    value=EgtState.egthdm_threshold,
-                    on_change=EgtState.set_egthdm_threshold.debounce(400),
-                    size="1",
-                    width="70px",
-                ),
-                align="center",
-                width="100%",
+        rx.hstack(
+            rx.icon(
+                rx.cond(EgtState.model_params_open, "chevron-down", "chevron-right"),
+                size=14,
             ),
-            rx.slider(
-                value=[EgtState.egthdm_threshold],
-                on_change=EgtState.set_egthdm_threshold.debounce(300),
-                min=0,
-                max=50,
-                step=0.5,
-                size="1",
-                width="100%",
-            ),
-            spacing="1",
-            align="stretch",
+            rx.text("Model parameters", size="2", weight="medium"),
+            on_click=EgtState.toggle_model_params_open,
+            cursor="pointer",
+            align="center",
             width="100%",
         ),
-        rx.vstack(
-            rx.hstack(
-                rx.text("Lookback cycles", size="1"),
-                rx.spacer(),
-                rx.input(
-                    type="number",
-                    value=EgtState.lookback_cycles,
-                    on_change=EgtState.set_lookback_cycles.debounce(400),
-                    min=1,
-                    size="1",
-                    width="70px",
-                ),
-                align="center",
+        rx.cond(
+            EgtState.model_params_open,
+            rx.vstack(
+                *[_model_param_row(field, label, step) for field, label, step in _MODEL_PARAM_FIELDS],
+                spacing="2",
+                align="stretch",
                 width="100%",
             ),
-            rx.slider(
-                value=[EgtState.lookback_cycles],
-                on_change=EgtState.set_lookback_cycles.debounce(300),
-                min=1,
-                max=100,
-                step=1,
-                size="1",
-                width="100%",
-            ),
-            spacing="1",
-            align="stretch",
-            width="100%",
         ),
-        spacing="3",
+        spacing="2",
         align="stretch",
         width="100%",
     )
