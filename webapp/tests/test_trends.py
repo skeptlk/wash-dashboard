@@ -8,7 +8,6 @@ import pytest
 from enginewash import (
     EGTHDM,
     GWFM,
-    FlightPhase,
     FlightRecord,
     TrendDirection,
 )

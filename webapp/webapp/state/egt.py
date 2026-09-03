@@ -111,8 +111,8 @@ class EgtState(rx.State):
     export_status: str = ""
 
     # --- Dataset version selection ---
-    # "working" = live auto baseline + editable overlay; otherwise a git sha of a
-    # committed curated snapshot, shown read-only.
+    # "working" = migrated baseline + editable overlay; otherwise a git sha of a
+    # committed dataset snapshot, shown read-only.
     selected_version: str = "working"
     version_options: list[dict] = []  # [{"value", "label"}], incl. "Working (live)"
     version_error: str = ""
@@ -337,7 +337,7 @@ class EgtState(rx.State):
             self.export_status = "No change — those flights are already labeled that way."
         else:
             self.export_status = (
-                f"Labeled {changed} flight(s) {self.label_start} → {self.label_end} "
+                f"Labeled {changed} observation(s) {self.label_start} → {self.label_end} "
                 f"as failure={self.label_value}."
             )
         self._refresh_labels()
@@ -363,7 +363,11 @@ class EgtState(rx.State):
             f"to {summary['path']}."
         )
         if ok:
-            self.export_status = base + " DVC pointers updated — run `git commit` and `dvc push` to publish."
+            self.export_status = (
+                base
+                + " DVC pointers updated — commit `egt-failure-dataset/data/*.dvc`, "
+                "then run `cd egt-failure-dataset && dvc push` to publish."
+            )
         else:
             self.export_status = base + f" (dvc add skipped: {out})"
 
@@ -562,23 +566,23 @@ class EgtState(rx.State):
                 line={"color": color, "width": 1.2, "dash": "dashdot"},
                 layer="above",
             )
-            label = f"{kind}" + (f" ({reason})" if reason else "")
+            event_label = f"{kind}" + (f" ({reason})" if reason else "")
             fig.add_annotation(
                 x=dt, y=0.01, xref="x", yref="paper",
-                text=label, showarrow=False,
+                text=event_label, showarrow=False,
                 font={"size": 8, "color": color}, yanchor="bottom",
                 textangle=-90,
             )
 
         if self.selected_version == "working":
-            # Live view: auto baseline (light red) + editable manual overlay.
+            # Live view: migrated baseline (light red) + editable manual overlay.
             for s, e in failure_spans_for(eid, start=start, end=end):
                 for i in range(1, nrows + 1):
                     fig.add_vrect(
                         x0=s, x1=e, fillcolor="red", opacity=0.15,
                         layer="below", line_width=0, row=i, col=1,
                     )
-            # Manual labels, distinct from auto spans:
+            # Manual labels, distinct from baseline spans:
             # green = cleared (failure 0), solid red outline = failure 1.
             for s, e, val in labels_store.manual_spans_for(eid, start=start, end=end):
                 color = "#d62728" if val == 1 else "#2ca02c"

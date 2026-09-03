@@ -1,13 +1,11 @@
-"""Manual EGT failure labels: overlay store + curated dataset export.
+"""Manual EGT failure labels: overlay store + dataset export.
 
 The EGT page lets a user mark a time range for an engine as ``failure = 0/1``.
-Those actions are appended to a small, auditable **overlay** parquet
-(``data/egt_manual_labels.parquet``) — one row per label action, whole-engine.
+Those actions are stored in a small, auditable overlay parquet in the
+``egt-failure-dataset`` DVC sub-repository.
 
-"Export" bakes the overlay into a full **curated** copy of the auto-labels frame
-(``data/egt_indication_curated.parquet``): every source row gets a ``failure_value``
-column, equal to the model's ``failure_value_auto`` except where a manual range
-overrides it (latest label wins on overlap). Both files are versioned with DVC.
+"Export" bakes the overlay into a full copy of the migrated baseline. Both the
+exported dataset and overlay are versioned with the nested DVC repository.
 
 Pure pandas; mirrors the load-once style of ``loader.py`` / ``egt_indication.py``.
 """
@@ -17,18 +15,19 @@ from __future__ import annotations
 import subprocess
 import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 
-from .egt_indication import RAW_AUTO_LABELS
+from .egt_indication import (
+    DATASET_DATA_DIR,
+    DATASET_REPO_ROOT,
+    RAW_BASELINE_LABELS,
+)
 
-# .../engine-wash/webapp/webapp/data/labels.py -> repo root is parents[3].
-REPO_ROOT = Path(__file__).resolve().parents[3]
-DATA_DIR = REPO_ROOT / "data"
-OVERLAY_PATH = DATA_DIR / "egt_manual_labels.parquet"
-CURATED_PATH = DATA_DIR / "egt_indication_curated.parquet"
+DATA_DIR = DATASET_DATA_DIR
+OVERLAY_PATH = DATA_DIR / "egt_failure_manual_labels.parquet"
+CURATED_PATH = DATA_DIR / "egt_failure_dataset.parquet"
 
 _OVERLAY_COLUMNS = [
     "row_id",
@@ -90,40 +89,45 @@ def _parse_dt(value) -> Optional[pd.Timestamp]:
     return ts
 
 
-# engine_id -> Series indexed by flight_datetime with the auto failure value (any
-# parameter failing at a timestamp → 1). Derived once per engine from the constant
-# auto-labels frame; used as the baseline the manual overlay records *diffs* against.
-_AUTO_BY_ENGINE: dict[str, pd.Series] = {}
+# engine_id -> Series indexed by flight_datetime with the migrated baseline label.
+# The manual overlay records only diffs against this immutable baseline.
+_BASELINE_BY_ENGINE: dict[str, pd.Series] = {}
 
 
-def _engine_auto(engine_id: str) -> pd.Series:
+def _engine_baseline(engine_id: str) -> pd.Series:
     eid = str(engine_id)
-    cached = _AUTO_BY_ENGINE.get(eid)
+    cached = _BASELINE_BY_ENGINE.get(eid)
     if cached is not None:
         return cached
-    df = RAW_AUTO_LABELS
+    df = RAW_BASELINE_LABELS
     if df is None or df.empty:
         s = pd.Series(dtype="int64")
     else:
-        sub = df[df["engine_id"].astype(str) == eid]
+        sub = df[df["engine_id"].astype("string") == eid]
         s = (
-            sub.groupby("flight_datetime")["failure_value_auto"]
+            sub.groupby("flight_datetime")["failure_value"]
             .max()
             .fillna(0)
             .astype(int)
             .sort_index()
         )
-    _AUTO_BY_ENGINE[eid] = s
+    _BASELINE_BY_ENGINE[eid] = s
     return s
 
 
-def _diff_ranges(eid: str, eff: pd.Series, auto: pd.Series, labeled_by: str, note: str) -> list[dict]:
-    """Maximal runs of consecutive flights where ``eff`` differs from ``auto`` and
+def _diff_ranges(
+    eid: str,
+    eff: pd.Series,
+    baseline: pd.Series,
+    labeled_by: str,
+    note: str,
+) -> list[dict]:
+    """Maximal runs where ``eff`` differs from ``baseline`` and
     shares the same value → one overlay row each (minimal, non-overlapping)."""
     rows: list[dict] = []
     ts = list(eff.index)
     vals = eff.to_numpy()
-    base = auto.to_numpy()
+    base = baseline.to_numpy()
     now = pd.Timestamp(datetime.now())
     run_start = run_end = None
     run_val: Optional[int] = None
@@ -186,15 +190,15 @@ def add_label(
     labeled_by: str = "",
     note: str = "",
 ) -> int:
-    """Label every flight of ``engine_id`` in ``[start, end]`` as ``failure_value``.
+    """Label every phase observation in ``[start, end]`` as ``failure_value``.
 
-    Idempotent and deduplicated at the per-flight level: a flight already at the
-    requested value (whether from the auto dataset or a prior manual change) is left
+    Idempotent and deduplicated by timestamp: an observation already at the
+    requested value (whether from the baseline or a prior manual change) is left
     untouched. The overlay is then rebuilt as a minimal, non-overlapping set of
-    correction ranges (diffs vs. the auto baseline), so re-labeling never appends
-    duplicate rows, and reverting a flight to its auto value drops it from the overlay.
+    correction ranges (diffs vs. the migrated baseline), so re-labeling never appends
+    duplicate rows, and reverting a flight to its baseline value drops it from the overlay.
 
-    Returns the number of flights whose effective label actually changed (0 = no-op).
+    Returns the number of timestamps whose effective label changed (0 = no-op).
     """
     s = _parse_dt(start)
     e = _parse_dt(end)
@@ -202,21 +206,23 @@ def add_label(
         raise ValueError("start and end must be valid dates")
     if e < s:
         s, e = e, s
-    # Exact-timestamp range: every flight reading (any parameter) whose timestamp
+    # Exact-timestamp range: every phase observation whose timestamp
     # falls in the closed interval [s, e] is selected — no day snapping.
     value = 1 if failure_value else 0
     eid = str(engine_id)
 
-    auto = _engine_auto(eid)
-    if auto.empty:
+    baseline = _engine_baseline(eid)
+    if baseline.empty:
         return 0
 
-    # Effective current label per flight = auto baseline overridden by existing overlay.
+    # Effective current label per flight = migrated baseline + existing overlay.
     overlay = load_overlay()
-    eff = auto.copy()
+    eff = baseline.copy()
     eng_rows = overlay[overlay["engine_id"] == eid]
     for r in eng_rows.itertuples():
-        m = (eff.index >= pd.Timestamp(r.start_datetime)) & (eff.index <= pd.Timestamp(r.end_datetime))
+        m = (eff.index >= pd.Timestamp(r.start_datetime)) & (
+            eff.index <= pd.Timestamp(r.end_datetime)
+        )
         eff.loc[m] = int(r.failure_value)
 
     sel = (eff.index >= s) & (eff.index <= e)
@@ -228,9 +234,9 @@ def add_label(
 
     eff.loc[sel] = value
 
-    # Rebuild this engine's overlay rows from the new effective state (diffs vs auto).
+    # Rebuild this engine's overlay rows from the effective state (diffs vs baseline).
     others = overlay[overlay["engine_id"] != eid]
-    new_rows = _diff_ranges(eid, eff, auto, labeled_by, note)
+    new_rows = _diff_ranges(eid, eff, baseline, labeled_by, note)
     if new_rows:
         combined = pd.concat([others, pd.DataFrame(new_rows)], ignore_index=True)
     else:
@@ -253,7 +259,7 @@ def manual_spans_for(
 ) -> list[tuple[datetime, datetime, int]]:
     """Manual label spans for one engine as ``(start, end, failure_value)``.
 
-    Clipped to ``[start, end]`` when given. Unlike the auto failure spans these
+    Clipped to ``[start, end]`` when given. Unlike baseline failure spans these
     are kept separate per value so the chart can color 0 (cleared) vs 1 (failing).
     """
     df = load_overlay()
@@ -275,17 +281,17 @@ def manual_spans_for(
 
 
 def export_curated() -> dict:
-    """Bake the overlay into a curated copy of the auto-labels frame.
+    """Bake the overlay into a copy of the migrated flight-level baseline.
 
-    Writes ``CURATED_PATH`` with a ``failure_value`` column (defaults to
-    ``failure_value_auto``, overridden per manual range, latest label wins).
+    Writes ``CURATED_PATH`` with manual ranges applied oldest to newest.
     Returns a summary dict ``{rows, overridden, path}``.
     """
-    if RAW_AUTO_LABELS is None or RAW_AUTO_LABELS.empty:
-        raise RuntimeError("auto-labels not loaded; cannot export curated dataset")
+    if RAW_BASELINE_LABELS is None or RAW_BASELINE_LABELS.empty:
+        raise RuntimeError("failure baseline not loaded; cannot export dataset")
 
-    out = RAW_AUTO_LABELS.copy()
-    out["failure_value"] = out["failure_value_auto"].fillna(0).astype(int)
+    out = RAW_BASELINE_LABELS.copy()
+    baseline = out["failure_value"].fillna(0).astype("int8")
+    out["failure_value"] = baseline
 
     overlay = load_overlay().sort_values("labeled_at")  # apply oldest→newest
     eid = out["engine_id"].astype(str)
@@ -298,7 +304,7 @@ def export_curated() -> dict:
         )
         out.loc[mask, "failure_value"] = int(r.failure_value)
 
-    overridden = int((out["failure_value"] != out["failure_value_auto"].fillna(0).astype(int)).sum())
+    overridden = int((out["failure_value"] != baseline).sum())
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     out.to_parquet(CURATED_PATH, index=False)
@@ -312,13 +318,13 @@ def dvc_add() -> tuple[bool, str]:
     operator so the web app never makes commits or network pushes on its own.
     """
     targets = [
-        str(OVERLAY_PATH.relative_to(REPO_ROOT)),
-        str(CURATED_PATH.relative_to(REPO_ROOT)),
+        str(OVERLAY_PATH.relative_to(DATASET_REPO_ROOT)),
+        str(CURATED_PATH.relative_to(DATASET_REPO_ROOT)),
     ]
     try:
         proc = subprocess.run(
             ["dvc", "add", *targets],
-            cwd=REPO_ROOT,
+            cwd=DATASET_REPO_ROOT,
             capture_output=True,
             text=True,
             timeout=120,

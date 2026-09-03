@@ -7,7 +7,6 @@ import plotly.graph_objects as go
 
 
 def build_analysis_chart(
-    engine_id: str,
     engine_label: str,
     curves: list[PlotCurve],
     markers: list[WashEventMarkers],

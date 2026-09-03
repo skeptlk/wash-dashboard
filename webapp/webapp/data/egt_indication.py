@@ -1,35 +1,31 @@
-"""Load the EGT-failure ML predictions (Boeing only).
+"""Load the flight-level EGT failure labels (Boeing only).
 
-The predictions parquet carries one ``failure_value_auto`` flag per
-(engine, parameter, flight). We collapse it to a per-flight failure flag
-(any parameter flagged → failing) and expose, per engine, the contiguous
-time spans where the sensor is predicted to be failing — used to shade the
-EGT Indication charts.
-
-Loaded once at import, mirroring ``loader.py``. The actual parameter *values*
-plotted on the charts come from the Boeing parquet files in the registry
-(the source of truth); this file is used only for the failure predictions.
+The baseline parquet has one row for every usable takeoff EGTHDM or cruise
+DEGT source observation.  Parameter values plotted on the charts still come
+from the Boeing source parquets; this dataset supplies only failure labels.
 """
 
 from __future__ import annotations
 
+import io
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 
-EGT_PREDICTIONS_URL = (
-    "https://storage.yandexcloud.net/ecm-data/egt_indication_auto_labels_2026-06-10.parquet"
-)
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DATASET_REPO_ROOT = REPO_ROOT / "egt-failure-dataset"
+DATASET_DATA_DIR = DATASET_REPO_ROOT / "data"
+BASELINE_REL = "data/egt_failure_baseline.parquet"
+BASELINE_PATH = DATASET_REPO_ROOT / BASELINE_REL
 
 # engine_id -> DataFrame[flight_datetime, failure], one row per flight, time-sorted.
 _BY_ENGINE: dict[str, pd.DataFrame] = {}
 
-# Full per-(engine, parameter, flight) auto-labels frame, normalized once at load.
-# Exposed so the labeling/export pipeline (`data/labels.py`) can build a curated copy
-# without re-downloading the parquet. Columns mirror the source plus a normalized
-# string `engine_id` and tz-naive `flight_datetime`.
-RAW_AUTO_LABELS: pd.DataFrame = pd.DataFrame()
+# Full flight-level migrated baseline, including source rows whose engine id is
+# null. Exposed so the labeling/export pipeline can preserve exact cardinality.
+RAW_BASELINE_LABELS: pd.DataFrame = pd.DataFrame()
 
 # Engines (str ids) that have predictions, sorted.
 EGT_PREDICTION_ENGINES: list[str] = []
@@ -38,30 +34,80 @@ EGT_PREDICTION_ENGINES: list[str] = []
 EGT_FAILURE_ENGINES: set[str] = set()
 
 
+def _read_baseline() -> pd.DataFrame:
+    """Read locally when pulled, otherwise stream through the nested DVC repo."""
+    if BASELINE_PATH.exists():
+        return pd.read_parquet(BASELINE_PATH)
+
+    try:
+        import dvc.api
+
+        with dvc.api.open(
+            BASELINE_REL, repo=str(DATASET_REPO_ROOT), mode="rb"
+        ) as source:
+            return pd.read_parquet(io.BytesIO(source.read()))
+    except Exception as exc:  # noqa: BLE001 - fail startup with actionable context
+        raise RuntimeError(
+            "Could not load the EGT failure baseline from DVC. "
+            "Run `dvc pull` in egt-failure-dataset."
+        ) from exc
+
+
 def _load() -> None:
-    global EGT_PREDICTION_ENGINES, EGT_FAILURE_ENGINES, RAW_AUTO_LABELS
+    global EGT_PREDICTION_ENGINES, EGT_FAILURE_ENGINES, RAW_BASELINE_LABELS
 
-    df = pd.read_parquet(EGT_PREDICTIONS_URL)
-    df = df.dropna(subset=["engine_id", "flight_datetime"]).copy()
-    df["engine_id"] = df["engine_id"].astype(int).astype(str)
+    raw = _read_baseline()
+    required = {
+        "aircraft_id",
+        "engine_position",
+        "engine_id",
+        "flight_phase",
+        "flight_datetime",
+        "failure_value",
+    }
+    missing = sorted(required.difference(raw.columns))
+    if missing:
+        raise RuntimeError(
+            f"EGT failure baseline is missing columns: {', '.join(missing)}"
+        )
 
-    dt = pd.to_datetime(df["flight_datetime"], errors="coerce")
+    raw = raw[
+        [
+            "aircraft_id",
+            "engine_position",
+            "engine_id",
+            "flight_phase",
+            "flight_datetime",
+            "failure_value",
+        ]
+    ]
+    raw["engine_id"] = pd.to_numeric(raw["engine_id"], errors="coerce").astype(
+        "Int64"
+    )
+    dt = pd.to_datetime(raw["flight_datetime"], errors="coerce")
     if dt.dt.tz is not None:
         dt = dt.dt.tz_localize(None)
-    df["flight_datetime"] = dt
-    df = df.dropna(subset=["flight_datetime"])
+    raw["flight_datetime"] = dt
+    labels = pd.to_numeric(raw["failure_value"], errors="coerce")
+    if labels.isna().any() or (~labels.isin([0, 1])).any():
+        raise RuntimeError("EGT failure baseline contains labels other than 0 or 1")
+    raw["failure_value"] = labels.astype("int8")
 
-    RAW_AUTO_LABELS = df.copy()
+    RAW_BASELINE_LABELS = raw
 
-    df["failure"] = df["failure_value_auto"].fillna(0).astype(int)
+    df = raw.dropna(subset=["engine_id", "flight_datetime"]).copy()
+    df["engine_id"] = df["engine_id"].astype("int64").astype(str)
+    df["failure"] = df["failure_value"].astype(int)
 
-    # Collapse to one flag per (engine, flight): any parameter flagged → failing.
+    # Guard against duplicate timestamps by retaining the strongest label.
     per_flight = (
         df.groupby(["engine_id", "flight_datetime"], as_index=False)["failure"]
         .max()
         .sort_values(["engine_id", "flight_datetime"])
     )
 
+    _BY_ENGINE.clear()
+    EGT_FAILURE_ENGINES.clear()
     for eid, g in per_flight.groupby("engine_id"):
         g = g[["flight_datetime", "failure"]].reset_index(drop=True)
         _BY_ENGINE[eid] = g
@@ -122,7 +168,7 @@ def failure_spans_for(
 ) -> list[tuple[datetime, datetime]]:
     """Contiguous time spans where the engine is predicted to be failing.
 
-    Thin wrapper over :func:`merge_failure_spans` using the auto-baseline
+    Thin wrapper over :func:`merge_failure_spans` using the migrated baseline
     per-flight frame. Optionally clipped to ``[start, end]``.
     """
     g = _BY_ENGINE.get(engine_id)

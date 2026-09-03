@@ -27,7 +27,6 @@ class AircraftBundle:
     utilization_df: pd.DataFrame
     wash_maint: pd.DataFrame
     engine_labels: dict[str, str]
-    engine_family_map: dict[str, str]
     available_engines: list[str]
     date_min: pd.Timestamp
     date_max: pd.Timestamp
@@ -168,7 +167,6 @@ def _load_one(aircraft_type: str, sources: AircraftDataSources) -> AircraftBundl
         utilization_df=utilization_df,
         wash_maint=wash_maint,
         engine_labels=engine_labels,
-        engine_family_map=engine_family_map,
         available_engines=available_engines,
         date_min=date_min,
         date_max=date_max,

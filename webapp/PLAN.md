@@ -58,7 +58,7 @@ Lives in the webapp while the API is still shifting; will move into `enginewash`
 
 ## State Design
 
-- **`GlobalState`** (`base.py`): `aircraft_type: str = "B737"`, `start_date / end_date: str`. Computed vars `aircraft_options`, `engine_options`, `engine_labels`. Setters re-default the date range when aircraft type changes.
+- **`GlobalState`** (`base.py`): `aircraft_types: list[str]`, `start_date / end_date: str`. Computed var `aircraft_options`; engine lists and labels are managed by each page. Setters re-default the date range when aircraft types change.
 - **`DegradationState`** (`state/degradation.py`): `selected_parameter: str = "EGTHDM"`, `selected_engine_id: str`, `ranked_rows: list[dict]`, `chart_figure: go.Figure`. Event handler `recompute()` loops engines in the current aircraft type, calls `compute_lifetime_trend`, sorts via `rank_engines_by_trend`, auto-selects the worst degrader so the chart populates immediately.
 - **`AnalysisState`** (Phase 2): mirrors current Dash controls — `selected_param`, `selected_engine_ids`, smoothing/detection params, `loe_threshold`. Handler `run_analysis()` builds `WashConfig`, runs `WashCalculator.process_all`, stores per-engine figures + summary + violin.
 - **`ScheduleState`** (Phase 3): ATA filter, engine filter, `gantt_figure`. Driven by a ported pure helper of `dashboard/schedule.py:_prepare`.
@@ -68,7 +68,7 @@ Pages access `GlobalState` via `self.get_state(GlobalState)` so shared selectors
 ## Data Layer
 
 - `data/registry.py` holds `AIRCRAFT_DATA_REGISTRY` — dict `aircraft_type → {onwing, maintenance, takeoff, cruise}` URLs. Only `"B737"` populated initially; slots reserved for `"A320"`, `"E170"`.
-- `data/loader.py` runs at import: iterates the registry, loads frames, builds `LOADED: dict[str, AircraftBundle]` (onwing/maintenance/takeoff/cruise + derived `wash_maint`, `engine_labels`, `engine_family_map`, `available_engines`, `date_min`, `date_max`). Module-level singleton — same pattern as the current Dash app at `dashboard/app.py:36-100`.
+- `data/loader.py` runs at import: iterates the registry, loads frames, builds `LOADED: dict[str, AircraftBundle]` (onwing/maintenance/takeoff/cruise + derived `wash_maint`, `engine_labels`, `available_engines`, `date_min`, `date_max`). Module-level singleton — same pattern as the current Dash app at `dashboard/app.py:36-100`. The engine-family map is used locally to sort engines during loading.
 - `data/derived.py` exposes `flights_for(bundle, engine_id, parameter, start=None, end=None) -> list[FlightRecord]` and `maint_for(bundle, engine_id) -> list[MaintenanceRecord]`, and `PARAMETER_BY_NAME` mapping name strings to `WashParameter` objects.
 
 ## Pages

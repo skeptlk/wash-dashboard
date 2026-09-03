@@ -1,9 +1,9 @@
-"""DVC dataset versions for the curated EGT labels.
+"""DVC dataset versions for the flight-level EGT failure labels.
 
-A dataset *version* is a git commit that changed the curated DVC pointer
-(``data/egt_indication_curated.parquet.dvc``). This module enumerates those
-commits and loads the curated parquet at any given revision via ``dvc.api`` so
-the EGT page can show a read-only view of a past labeled snapshot.
+A dataset *version* is a git commit that changed the DVC pointer at
+``egt-failure-dataset/data/egt_failure_dataset.parquet.dvc``. This module
+enumerates those commits and loads the parquet at any given revision via
+``dvc.api`` so the EGT page can show a read-only snapshot.
 
 The app never commits or pushes — a new version appears here only after the
 user commits the pointer to git.
@@ -20,12 +20,12 @@ from typing import Optional
 
 import pandas as pd
 
-from .egt_indication import merge_failure_spans
-from .labels import REPO_ROOT
+from .egt_indication import DATASET_REPO_ROOT, REPO_ROOT, merge_failure_spans
 
-# Path of the curated parquet relative to the repo root (as DVC/git see it).
-CURATED_REL = "data/egt_indication_curated.parquet"
-CURATED_DVC = "data/egt_indication_curated.parquet.dvc"
+# The data path is relative to the nested DVC root; the pointer path is relative
+# to the outer Git repository.
+CURATED_REL = "data/egt_failure_dataset.parquet"
+CURATED_DVC = "egt-failure-dataset/data/egt_failure_dataset.parquet.dvc"
 
 # Field separator for `git log --format` (unit separator, safe in commit text).
 _FS = "\x1f"
@@ -77,7 +77,9 @@ def _load_version_frame(sha: str) -> pd.DataFrame:
     try:
         import dvc.api
 
-        with dvc.api.open(CURATED_REL, repo=str(REPO_ROOT), rev=sha, mode="rb") as f:
+        with dvc.api.open(
+            CURATED_REL, repo=str(DATASET_REPO_ROOT), rev=sha, mode="rb"
+        ) as f:
             df = pd.read_parquet(io.BytesIO(f.read()))
     except Exception as exc:  # noqa: BLE001 — surface any fetch/read failure to UI
         raise RuntimeError(
@@ -86,12 +88,16 @@ def _load_version_frame(sha: str) -> pd.DataFrame:
 
     # Normalize to match the live path (egt_indication._load).
     df = df.dropna(subset=["engine_id", "flight_datetime"]).copy()
-    df["engine_id"] = df["engine_id"].astype(int).astype(str)
+    df["engine_id"] = pd.to_numeric(df["engine_id"], errors="coerce").astype(
+        "Int64"
+    )
     dt = pd.to_datetime(df["flight_datetime"], errors="coerce")
     if dt.dt.tz is not None:
         dt = dt.dt.tz_localize(None)
     df["flight_datetime"] = dt
     df = df.dropna(subset=["flight_datetime"])
+    df = df.dropna(subset=["engine_id"])
+    df["engine_id"] = df["engine_id"].astype("int64").astype(str)
 
     _FRAME_CACHE[sha] = df
     return df

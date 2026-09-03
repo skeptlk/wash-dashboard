@@ -111,7 +111,6 @@ class AnalysisState(rx.State):
     is_computing: bool = False
     has_results: bool = False
     error_message: str = ""
-    active_engine_id: str = ""
     # Key ("<engine_id>:<event_index>") of the wash row currently selected in the
     # summary table — drives the row highlight and the chart zoom.
     selected_event_key: str = ""
@@ -276,7 +275,6 @@ class AnalysisState(rx.State):
         fig = self._figures_cache.get(engine_id)
         if fig is None:
             return
-        self.active_engine_id = engine_id
         self.selected_event_key = f"{engine_id}:{event_index}"
         rng = self._event_ranges.get(self.selected_event_key)
         if rng is not None:
@@ -377,7 +375,6 @@ class AnalysisState(rx.State):
             if not eng_markers:
                 continue
             figures[eid] = build_analysis_chart(
-                eid,
                 labels.get(eid, eid),
                 curves_by_eng.get(eid, []),
                 eng_markers,
@@ -396,7 +393,6 @@ class AnalysisState(rx.State):
         self.selected_event_key = ""
 
         # Summary table rows (sorted by engine, then event index)
-        engine_ids_with_events = {str(ev.engine_id) for ev in all_events}
         sorted_events = sorted(
             [ev for ev in all_events if str(ev.engine_id) in figures],
             key=lambda e: (str(e.engine_id), e.event_index),
@@ -406,7 +402,7 @@ class AnalysisState(rx.State):
 
         # Violin plot
         self.violin_figure = build_violin_figure(
-            [ev for ev in all_events if str(ev.engine_id) in figures],
+            sorted_events,
             calc_param,
         )
 
@@ -415,7 +411,6 @@ class AnalysisState(rx.State):
             (e for e in self.selected_engine_ids if e in figures),
             next(iter(figures)),
         )
-        self.active_engine_id = first_eid
         self.chart_figure = figures[first_eid]
 
         self.has_results = True

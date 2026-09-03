@@ -49,29 +49,6 @@ class GlobalState(rx.State):
     def aircraft_options(self) -> list[str]:
         return AIRCRAFT_TYPES
 
-    @rx.var
-    def engine_options(self) -> list[str]:
-        """Engines across all selected types (deduped, order-preserving)."""
-        seen: dict[str, None] = {}
-        for t in self.aircraft_types:
-            bundle = LOADED.get(t)
-            if bundle is None:
-                continue
-            for eid in bundle.available_engines:
-                seen.setdefault(eid, None)
-        return list(seen)
-
-    @rx.var
-    def engine_labels(self) -> dict[str, str]:
-        """Merged engine labels across all selected types."""
-        labels: dict[str, str] = {}
-        for t in self.aircraft_types:
-            bundle = LOADED.get(t)
-            if bundle is None:
-                continue
-            labels.update(bundle.engine_labels)
-        return labels
-
     def apply_type_toggle(self, ac_type: str, checked: bool):
         """Add/remove a type and recompute the date range.
 
