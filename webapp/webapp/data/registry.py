@@ -20,8 +20,8 @@ AIRCRAFT_DATA_REGISTRY: dict[str, AircraftDataSources] = {
     "B737": {
         "onwing": _SHARED_ONWING,
         "maintenance": _SHARED_MAINTENANCE,
-        "takeoff": "https://storage.yandexcloud.net/ecm-data/s7.b737_takeoff_20260610-merged.parquet",
-        "cruise": "https://storage.yandexcloud.net/ecm-data/s7.b737_cruise_20260610-merged.parquet",
+        "takeoff": "https://storage.yandexcloud.net/ecm-data/s7.b737_takeoff_20260911-merged.parquet",
+        "cruise": "https://storage.yandexcloud.net/ecm-data/s7.b737_cruise_20260911-merged.parquet",
         "utilization": _SHARED_UTILIZATION,
     },
     "A320": {
