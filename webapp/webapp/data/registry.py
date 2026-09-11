@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import NotRequired, TypedDict
 
 _SHARED_ONWING = "https://storage.yandexcloud.net/ecm-data/s7_mdb.onwing_engine_inc_20260610.csv"
-_SHARED_MAINTENANCE = "https://storage.yandexcloud.net/ecm-data/ecmapp.maintenance_20260610.parquet"
+_SHARED_MAINTENANCE = "https://storage.yandexcloud.net/ecm-data/ecmapp.maintenance_20260911.parquet"
 _SHARED_UTILIZATION = "https://storage.yandexcloud.net/ecm-data/utilization_prepared_2026-06-10.parquet"
 
 class AircraftDataSources(TypedDict):
