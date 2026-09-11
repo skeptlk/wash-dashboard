@@ -11,6 +11,7 @@ _DEPLOY_URL = os.getenv("REFLEX_DEPLOY_URL")
 
 _kwargs = {
     "app_name": "webapp",
+    "show_built_with_reflex": False,
     "plugins": [
         rx.plugins.SitemapPlugin(),
         rx.plugins.TailwindV4Plugin(),

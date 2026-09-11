@@ -16,7 +16,11 @@ from .state.degradation import DegradationState
 from .state.egt import EgtState
 from .state.schedule import ScheduleState
 
-app = rx.App()
+app = rx.App(
+    head_components=[
+        rx.el.link(rel="icon", href="/plane.svg", type="image/svg+xml"),
+    ],
+)
 app.add_page(
     login_page,
     route="/login",
