@@ -79,9 +79,9 @@ def _load_one(aircraft_type: str, sources: AircraftDataSources) -> AircraftBundl
     )
     engine_labels: dict[str, str] = {}
     for row in last_install.itertuples():
-        suffix = "" if row.engine_id in current_eids else " (off wing)"
+        suffix = "" if row.engine_id in current_eids else "\n(not installed)"
         engine_labels[row.engine_id] = (
-            f"{row.engine_id} — "
+            f"{row.engine_id}: "
             f"{_family_display(row.aircraft_family)} "
             f"{AIRCRAFT_REG.get(row.aircraft_id, row.aircraft_id)} "
             f"pos.{row.engine_position}{suffix}"

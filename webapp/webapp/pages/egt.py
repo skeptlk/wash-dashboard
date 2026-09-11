@@ -7,10 +7,17 @@ see EGTHDM / DEGT / GWFM over time with predicted-failure spans shaded red.
 from __future__ import annotations
 
 import reflex as rx
+from plotly.io import templates
+from reflex_components_plotly.plotly import Plotly
 
 from ..components.selectors import date_range_picker
 from ..components.shell import page_shell
 from ..state.egt import EgtState
+
+
+class EgtPlotly(Plotly):
+    # Reflex's default Plotly handler discards the relayout payload.
+    on_relayout: rx.EventHandler[lambda data: [data]]
 
 
 def _engine_row(e: rx.Var) -> rx.Component:
@@ -22,7 +29,7 @@ def _engine_row(e: rx.Var) -> rx.Component:
                 rx.icon("triangle-alert", size=12, color="var(--red-9)"),
                 rx.box(width="12px"),
             ),
-            rx.text(e["label"], size="1"),
+            rx.text(e["label"], size="1", white_space="pre-line"),
             spacing="2",
             align="center",
             width="100%",
@@ -134,19 +141,6 @@ def _param_group(title: str, options: rx.Var) -> rx.Component:
         ),
         spacing="1",
         align="start",
-        width="100%",
-    )
-
-
-def _iqr_toggle() -> rx.Component:
-    return rx.hstack(
-        rx.text("Show IQR noise bars", size="2", weight="medium"),
-        rx.spacer(),
-        rx.switch(
-            checked=EgtState.show_iqr,
-            on_change=EgtState.toggle_show_iqr,
-        ),
-        align="center",
         width="100%",
     )
 
@@ -337,9 +331,8 @@ def _labeling_panel() -> rx.Component:
 def _control_panel() -> rx.Component:
     return rx.vstack(
         rx.heading("Controls", size="4"),
-        date_range_picker(),
+        date_range_picker(EgtState.set_start_date, EgtState.set_end_date),
         _model_params(),
-        _iqr_toggle(),
         _param_selector(),
         _version_selector(),
         rx.cond(
@@ -371,8 +364,14 @@ def _control_panel() -> rx.Component:
         ),
         spacing="4",
         align="stretch",
-        max_width="350px",
-        width="auto",
+        width=rx.breakpoints(initial="100%", md="300px"),
+        max_height="100%",
+        flex_shrink="0",
+        overflow_y="auto",
+        style={
+            "& .rt-TextFieldRoot": {"min_width": "0"},
+            "& input[type='date']": {"font_size": "12px"},
+        },
         padding="10px",
         border="1px solid var(--gray-5)",
         border_radius="md",
@@ -393,11 +392,24 @@ def _results_panel() -> rx.Component:
         ),
         rx.cond(
             EgtState.has_chart,
-            rx.plotly(
-                data=EgtState.chart_figure,
-                on_selected=EgtState.on_plot_selected,
+            rx.box(
+                EgtPlotly.create(
+                    data=EgtState.chart_figure,
+                    template=rx.color_mode_cond(
+                        light=templates["plotly_white"],
+                        dark=templates["plotly_dark"],
+                    ),
+                    on_selected=EgtState.on_plot_selected,
+                    on_relayout=EgtState.on_plot_relayout,
+                    config={"displaylogo": False, "responsive": True},
+                    width="100%",
+                    height=EgtState.chart_height,
+                ),
                 width="100%",
-                height=EgtState.chart_height,
+                min_height="0",
+                flex="1",
+                overflow_y="auto",
+                overflow_x="hidden",
             ),
             rx.callout(
                 "Select an engine to see its EGT failure prediction.",
@@ -408,6 +420,8 @@ def _results_panel() -> rx.Component:
         spacing="4",
         align="stretch",
         width="100%",
+        min_width="0",
+        height=rx.breakpoints(initial="75dvh", md="100%"),
         flex="1",
     )
 
@@ -415,16 +429,14 @@ def _results_panel() -> rx.Component:
 def egt_page() -> rx.Component:
     return page_shell(
         "/egt",
-        rx.vstack(
-            rx.hstack(
-                _control_panel(),
-                _results_panel(),
-                spacing="6",
-                align="start",
-                width="100%",
-            ),
-            spacing="4",
-            align="stretch",
+        rx.flex(
+            _control_panel(),
+            _results_panel(),
+            direction=rx.breakpoints(initial="column", md="row"),
+            gap="12px",
+            align="start",
             width="100%",
+            # Header (61px including border) + shell's vertical padding (12px).
+            height=rx.breakpoints(initial="auto", md="calc(100dvh - 73px)"),
         ),
     )

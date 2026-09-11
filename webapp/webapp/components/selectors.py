@@ -40,20 +40,20 @@ def aircraft_type_selector(on_toggle=None) -> rx.Component:
     )
 
 
-def date_range_picker() -> rx.Component:
+def date_range_picker(on_start_change=None, on_end_change=None) -> rx.Component:
     return rx.vstack(
         rx.text("Date range", size="2", weight="medium"),
         rx.hstack(
             rx.input(
                 type="date",
                 value=GlobalState.start_date,
-                on_change=GlobalState.set_start_date,
+                on_change=on_start_change or GlobalState.set_start_date,
                 width="100%",
             ),
             rx.input(
                 type="date",
                 value=GlobalState.end_date,
-                on_change=GlobalState.set_end_date,
+                on_change=on_end_change or GlobalState.set_end_date,
                 width="100%",
             ),
             spacing="2",

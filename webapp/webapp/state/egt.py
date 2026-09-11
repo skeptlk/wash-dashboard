@@ -6,6 +6,8 @@ View of the EGT probe failure ML predictions
 from __future__ import annotations
 
 from datetime import datetime
+import json
+import re
 from typing import Optional
 
 import pandas as pd
@@ -29,20 +31,7 @@ from .base import GlobalState
 
 _AIRCRAFT_TYPE = "B737"
 
-_PARAM_COLOR = "#1f77b4"
-
-_SMOOTH_WINDOW = 30
-
-# Rolling robust-dispersion ("noise") companion bar. IQR is robust to outliers,
-# unlike std. Hypothesis: data gets noisier around a failure.
-_SCATTER_WINDOW = 15
-
-
-def _rolling_scatter(ys: list[float], window: int = _SCATTER_WINDOW) -> list[float]:
-    r = pd.Series(ys, dtype="float64").rolling(
-        window, center=True, min_periods=max(2, window // 3)
-    )
-    return (r.quantile(0.75) - r.quantile(0.25)).tolist()
+_PARAM_COLOR = "#3b82f6"
 
 # Show ATA markers up to this many days before the first flight (context).
 _ATA_GRACE_DAYS = 60
@@ -77,6 +66,8 @@ class EgtState(rx.State):
     """Per-page state for the EGT Indication view."""
 
     selected_engine_id: str = ""
+    timeline_start: str = ""
+    timeline_end: str = ""
     engine_search: str = ""
     available_engines_labeled: list[dict] = []  # [{"id", "label"}]
 
@@ -97,7 +88,6 @@ class EgtState(rx.State):
     selected_params: list[str] = egt_params.DEFAULT_PARAMS
     param_search: str = ""
     params_open: bool = False
-    show_iqr: bool = False
 
     has_chart: bool = False
     chart_figure: go.Figure = go.Figure()
@@ -153,7 +143,9 @@ class EgtState(rx.State):
 
     @rx.var
     def chart_height(self) -> str:
-        return "100vh"
+        # The default three rows fit the viewport; extra rows scroll locally.
+        rows = len(self.selected_params)
+        return "100%" if rows <= 3 else f"max(100%, {rows * 180 + 150}px)"
 
     @rx.event
     def set_param_search(self, value: str):
@@ -162,11 +154,6 @@ class EgtState(rx.State):
     @rx.event
     def toggle_params_open(self):
         self.params_open = not self.params_open
-
-    @rx.event
-    async def toggle_show_iqr(self, value: bool):
-        self.show_iqr = value
-        await self._build_chart()
 
     @rx.event
     async def toggle_param(self, param_id: str, checked: bool):
@@ -252,6 +239,21 @@ class EgtState(rx.State):
     async def on_load(self):
         self._build_engine_list()
         self._refresh_versions()
+        params = self.router.url.query_parameters
+        engine = params.get("engine", "")
+        if any(e["id"] == engine for e in self.available_engines_labeled):
+            self.selected_engine_id = engine
+        gs = await self.get_state(GlobalState)
+        for key, field in (("start", "start_date"), ("end", "end_date")):
+            value = params.get(key, "")
+            if key in params and (not value or (
+                re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) and _parse_date(value)
+            )):
+                setattr(gs, field, value)
+        self.timeline_start = self.timeline_end = ""
+        lo, hi = params.get("x_start", ""), params.get("x_end", "")
+        if self._valid_timeline(lo, hi):
+            self.timeline_start, self.timeline_end = lo, hi
         if self.available_engines_labeled and (
             not self.selected_engine_id
             or all(e["id"] != self.selected_engine_id for e in self.available_engines_labeled)
@@ -260,12 +262,81 @@ class EgtState(rx.State):
         if self.selected_engine_id:
             self._refresh_labels()
             await self._build_chart()
+        return await self._sync_url()
 
     @rx.event
     async def select_engine(self, engine_id: str):
         self.selected_engine_id = engine_id
         self._refresh_labels()
         await self._build_chart()
+        return await self._sync_url()
+
+    async def _sync_url(self):
+        gs = await self.get_state(GlobalState)
+        params = json.dumps({
+            "engine": self.selected_engine_id,
+            "start": gs.start_date, "end": gs.end_date,
+            "x_start": self.timeline_start, "x_end": self.timeline_end,
+        })
+        return rx.call_script(
+            "(() => { const url = new URL(window.location.href);"
+            "if (url.pathname.replace(/\\/$/, '') !== '/egt') return;"
+            f"for (const [key, value] of Object.entries({params})) {{"
+            "if (value || key === 'start' || key === 'end') url.searchParams.set(key, value);"
+            "else url.searchParams.delete(key);"
+            "} window.history.replaceState(window.history.state, '', url.href); })()"
+        )
+
+    @staticmethod
+    def _valid_timeline(lo, hi) -> bool:
+        if not isinstance(lo, str) or not isinstance(hi, str):
+            return False
+        start, end = _parse_date(lo), _parse_date(hi)
+        try:
+            return start is not None and end is not None and start < end
+        except TypeError:
+            return False
+
+    async def _set_date(self, field: str, value: str):
+        if value and not (re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) and _parse_date(value)):
+            return
+        gs = await self.get_state(GlobalState)
+        setattr(gs, field, value)
+        self.timeline_start = self.timeline_end = ""
+        if self.selected_engine_id:
+            await self._build_chart()
+        return await self._sync_url()
+
+    @rx.event
+    async def set_start_date(self, value: str):
+        return await self._set_date("start_date", value)
+
+    @rx.event
+    async def set_end_date(self, value: str):
+        return await self._set_date("end_date", value)
+
+    @rx.event
+    async def on_plot_relayout(self, data: dict):
+        previous = (self.timeline_start, self.timeline_end)
+        for key, value in data.items():
+            if re.fullmatch(r"xaxis\d*\.autorange", key) and value is True:
+                self.timeline_start = self.timeline_end = ""
+                break
+            if re.fullmatch(r"xaxis\d*\.range(?:\[0\])?", key):
+                bounds = value if isinstance(value, list) else [value, data.get(key.replace("[0]", "[1]"))]
+                if len(bounds) == 2 and self._valid_timeline(*bounds):
+                    self.timeline_start, self.timeline_end = bounds
+                    break
+        else:
+            return
+        if previous == (self.timeline_start, self.timeline_end):
+            return
+        # Retain the viewport on later chart rebuilds without recomputing on pan.
+        self.chart_figure.update_xaxes(
+            range=[self.timeline_start, self.timeline_end] if self.timeline_start else None,
+            autorange=not bool(self.timeline_start),
+        )
+        return await self._sync_url()
 
     # --- Labeling events ---
 
@@ -302,7 +373,14 @@ class EgtState(rx.State):
     @rx.event
     def on_plot_selected(self, points: list[dict]):
         """Box-select on the chart → set the label range from the points' x-span."""
-        xs = [p.get("x") for p in (points or []) if p.get("x") is not None]
+        # Event markers carry maintenance dates, not flight observations.
+        xs = [
+            p["x"] for p in (points or [])
+            if p.get("x") is not None
+            and isinstance(p.get("curveNumber"), int)
+            and 0 <= p["curveNumber"] < len(self.chart_figure.data)
+            and self.chart_figure.data[p["curveNumber"]].meta == "reading"
+        ]
         if not xs:
             return
         ts = pd.to_datetime(pd.Series(xs), errors="coerce").dropna()
@@ -451,14 +529,19 @@ class EgtState(rx.State):
             rows=nrows,
             cols=1,
             shared_xaxes=True,
-            # Keep spacing valid (plotly caps it at 1/(rows-1)) as row count grows.
-            vertical_spacing=min(0.05, 0.8 / max(1, nrows - 1)),
+            # Invisible secondary axes anchor events inside each chart without
+            # changing its measurement scale, including when the user zooms.
+            specs=[[{"secondary_y": True}] for _ in entries],
+            vertical_spacing=min(0.085, 0.7 / max(1, nrows - 1)),
             subplot_titles=titles,
         )
+        fig.update_annotations(x=0, xanchor="left", font_size=12, yshift=3)
 
         for i, entry in enumerate(entries, start=1):
             pname = entry["name"]
-            xs, ys = egt_params.series_for(bundle, eid, entry, start=start, end=end)
+            xs, ys, smoothed = egt_params.smoothed_series_for(
+                bundle, eid, entry, self.smoothing_window, start=start, end=end,
+            )
 
             if xs:
                 data_min = xs[0] if data_min is None else min(data_min, xs[0])
@@ -469,22 +552,30 @@ class EgtState(rx.State):
                     x=xs,
                     y=ys,
                     mode="markers",
-                    name=pname,
-                    marker={"size": 5, "color": "#888", "opacity": 0.45},
-                    selected={"marker": {"size": 9, "opacity": 0.9}},
+                    name="Actual",
+                    legendgroup="readings",
+                    showlegend=i == 1,
+                    meta="reading",
+                    hovertemplate=f"%{{x|%d.%m.%y, %H:%M:%S}}<br>{pname}: %{{y:.2f}}<extra></extra>",
+                    marker={"size": 3, "color": _PARAM_COLOR, "opacity": 0.4},
+                    selected={"marker": {"size": 5, "opacity": 0.9}},
                     unselected={"marker": {"opacity": 0.2}},
                 ),
                 row=i,
                 col=1,
             )
 
-            smoothed = pd.Series(ys).rolling(_SMOOTH_WINDOW, center=True, min_periods=1).mean()
+            line_x, line_y, gaps = egt_params.line_with_gaps(xs, smoothed)
             fig.add_trace(
                 go.Scatter(
-                    x=xs,
-                    y=smoothed.tolist(),
+                    x=line_x,
+                    y=line_y,
+                    connectgaps=False,
                     mode="lines",
-                    name=f"{pname} smooth",
+                    name=f"Smoothed (window={self.smoothing_window})",
+                    legendgroup="smooth",
+                    showlegend=i == 1,
+                    hovertemplate=f"%{{x|%d.%m.%y, %H:%M:%S}}<br>{pname} average: %{{y:.2f}}<extra></extra>",
                     line={"color": _PARAM_COLOR, "width": 1.5},
                     opacity=0.9,
                 ),
@@ -492,23 +583,16 @@ class EgtState(rx.State):
                 col=1,
             )
 
-            # Rolling robust dispersion (noise proxy) as bars on the same axis,
-            # baseline-shifted to sit just under the data so it's readable.
-            if self.show_iqr:
-                scatter = _rolling_scatter(ys)
-                base = min((v for v in ys if v == v), default=0.0)
-                bar_kwargs = {
-                    "x": xs,
-                    "y": scatter,
-                    "base": base,
-                    "name": f"{pname} noise (IQR {_SCATTER_WINDOW})",
-                    "marker": {"color": "#ff7f0e", "opacity": 0.35, "line": {"width": 0}},
-                }
-                if len(xs) > 1:
-                    gap_ms = pd.Series(xs).diff().dt.total_seconds().median() * 1000
-                    if gap_ms == gap_ms:  # not NaN
-                        bar_kwargs["width"] = gap_ms * 0.5
-                fig.add_trace(go.Bar(**bar_kwargs), row=i, col=1)
+            for gap_start, gap_end in gaps:
+                fig.add_vrect(
+                    x0=gap_start, x1=gap_end,
+                    fillcolor="rgba(128,128,128,0.05)",
+                    line_width=0, layer="below", row=i, col=1,
+                    annotation_text="No data",
+                    annotation_position="inside",
+                    annotation_font={"size": 9, "color": "#888"},
+                    annotation_textangle=-90,
+                )
 
             # Overlay the enhanced model's predicted failures on takeoff EGTHDM.
             if entry["id"] == egt_params.EGTHDM_TAKEOFF_ID and model_predictions:
@@ -523,56 +607,61 @@ class EgtState(rx.State):
                             x=list(px),
                             y=list(py),
                             mode="markers",
-                            name="Model prediction",
+                            name="Prediction",
+                            hovertemplate="%{x|%d.%m.%y, %H:%M:%S}<br>Predicted failure: %{y:.2f}<extra></extra>",
                             marker={"symbol": "x", "size": 7, "color": "red"},
                         ),
                         row=i,
                         col=1,
                     )
 
-            fig.update_yaxes(title_text=pname, row=i, col=1)
-
         # Maintenance events (ATA 223/224) as dotted vertical lines. Skip events
         # outside the flight-data span (with a small grace window before the
         # first flight) — they'd otherwise stretch the x-axis.
         ata_lo = data_min - pd.Timedelta(days=_ATA_GRACE_DAYS) if data_min is not None else None
+        events: dict[str, list[tuple]] = {"ATA 223": [], "ATA 224": [], "Install": [], "Removal": []}
         for dt, ata in sorted(maint_events_for_ata(bundle, eid, ["223", "224"]), key=lambda x: x[0]):
             if ata_lo is not None and (dt < ata_lo or dt > data_max):
                 continue
-            fig.add_shape(
-                type="line", x0=dt, x1=dt, y0=0, y1=1,
-                xref="x", yref="paper",
-                line={"color": "darkorchid", "width": 1.2, "dash": "dot"},
-                layer="above",
-            )
-            fig.add_annotation(
-                x=dt, y=0.99, xref="x", yref="paper",
-                text=f"ATA {ata}", showarrow=False,
-                font={"size": 8, "color": "darkorchid"}, yanchor="top",
-                textangle=-90,
-            )
+            events[f"ATA {ata}"].append((dt, f"ATA {ata}"))
 
         # Install/removal points from the onwing history, same grace/clip rule as ATA.
-        _EVENT_COLOR = {"Install": "#2ca02c", "Removal": "#d62728"}
         for dt, kind, reason in sorted(
             install_removal_events_for(bundle, eid), key=lambda x: x[0]
         ):
             if ata_lo is not None and (dt < ata_lo or dt > data_max):
                 continue
-            color = _EVENT_COLOR[kind]
-            fig.add_shape(
-                type="line", x0=dt, x1=dt, y0=0, y1=1,
-                xref="x", yref="paper",
-                line={"color": color, "width": 1.2, "dash": "dashdot"},
-                layer="above",
-            )
             event_label = f"{kind}" + (f" ({reason})" if reason else "")
-            fig.add_annotation(
-                x=dt, y=0.01, xref="x", yref="paper",
-                text=event_label, showarrow=False,
-                font={"size": 8, "color": color}, yanchor="bottom",
-                textangle=-90,
-            )
+            events[kind].append((dt, event_label))
+
+        for kind, color, symbol, position in [
+            ("ATA 223", "#a855f7", "diamond", 0.96),
+            ("ATA 224", "#a855f7", "diamond-open", 0.96),
+            ("Install", "#2ca02c", "triangle-up", 0.96),
+            ("Removal", "#d62728", "triangle-down", 0.83),
+        ]:
+            points = events[kind]
+            for i in range(1, nrows + 1):
+                fig.add_trace(
+                    go.Scatter(
+                        x=[dt for dt, _ in points],
+                        y=[position] * len(points),
+                        customdata=[text for _, text in points],
+                        mode="markers",
+                        name=kind,
+                        showlegend=False,
+                        marker={"color": color, "symbol": symbol, "size": 7},
+                        hovertemplate="%{customdata}<br>%{x|%d.%m.%y, %H:%M}<extra></extra>",
+                    ),
+                    row=i, col=1, secondary_y=True,
+                )
+                for dt, _ in points:
+                    fig.add_shape(
+                        type="line", x0=dt, x1=dt, y0=0, y1=1,
+                        yref="y domain",
+                        line={"color": color, "width": 1, "dash": "dot"},
+                        opacity=0.4, layer="below", row=i, col=1,
+                    )
 
         if self.selected_version == "working":
             # Live view: migrated baseline (light red) + editable manual overlay.
@@ -612,12 +701,35 @@ class EgtState(rx.State):
         if self.selected_version != "working":
             title += f"  ·  version {self.selected_version[:7]}"
         fig.update_layout(
-            title=title,
-            margin={"l": 50, "r": 10, "t": 50, "b": 30},
+            template="plotly_white",
+            title={
+                "text": title, "font": {"size": 15}, "x": 0.01,
+                "y": 1, "yanchor": "top", "pad": {"t": 8},
+            },
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin={"l": 66, "r": 16, "t": 70, "b": 38},
+            font={"family": "Inter, system-ui, sans-serif", "size": 11},
+            legend={
+                "orientation": "h", "x": 1, "xanchor": "right",
+                "y": 1, "yanchor": "bottom",
+            },
             autosize=True,
             showlegend=True,
             dragmode="select" if self.label_mode else "zoom",
         )
-        fig.update_xaxes(tickformat="%Y-%m-%d", ticks="outside")
+        fig.update_xaxes(
+            tickformat="%d.%m.%y", showticklabels=True, domain=[0, 1],
+            range=[self.timeline_start, self.timeline_end] if self.timeline_start else None,
+            autorange=not bool(self.timeline_start),
+            ticks="outside", ticklen=3,
+            gridcolor="rgba(128,128,128,0.12)", zeroline=False,
+        )
+        fig.update_yaxes(
+            gridcolor="rgba(128,128,128,0.15)", zeroline=False, nticks=5,
+        )
+        fig.update_yaxes(
+            range=[0, 1], fixedrange=True, visible=False, secondary_y=True,
+        )
         self.chart_figure = fig
         self.has_chart = True

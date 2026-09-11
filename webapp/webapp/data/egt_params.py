@@ -11,9 +11,12 @@ Pure pandas; the actual values come from the loaded ``AircraftBundle`` frames.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from .loader import AircraftBundle
+import pandas as pd
+
+if TYPE_CHECKING:
+    from .loader import AircraftBundle
 
 # Columns that are keys/metadata, not measurements.
 _META_COLS = {
@@ -32,6 +35,23 @@ EGTHDM_TAKEOFF_ID = "EGTHDM@TAKEOFF"
 DEGT_CRUISE_ID = "DEGT@CRUISE"
 
 _CATALOG_CACHE: dict[int, list[dict]] = {}
+
+
+def line_with_gaps(xs: list, ys: list) -> tuple[list, list, list[tuple]]:
+    """Break a displayed curve across gaps of at least seven days.
+
+    Only change the plotted line; the smoothed observations and model inputs
+    retain their original values.
+    """
+    line_x, line_y, gaps = [], [], []
+    for i, (x, y) in enumerate(zip(xs, ys)):
+        if i and x - xs[i - 1] >= pd.Timedelta(days=7):
+            gaps.append((xs[i - 1], x))
+            line_x.append(None)
+            line_y.append(None)
+        line_x.append(x)
+        line_y.append(y)
+    return line_x, line_y, gaps
 
 
 def catalog(bundle: AircraftBundle) -> list[dict]:
@@ -74,3 +94,29 @@ def series_for(
         mask &= df["flight_datetime"] <= end
     sub = df.loc[mask, ["flight_datetime", col]].sort_values("flight_datetime")
     return sub["flight_datetime"].tolist(), sub[col].tolist()
+
+
+def smoothed_series_for(
+    bundle: AircraftBundle,
+    engine_id: str,
+    entry: dict,
+    window: int,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+) -> tuple[list, list, list]:
+    """Readings and the model's trailing mean, clipped only after smoothing.
+
+    Retain history before ``start`` so changing the displayed range does not
+    change the curve or separate it from the model's predicted-failure points.
+    """
+    xs, ys = series_for(bundle, engine_id, entry)
+    smoothed = pd.Series(ys, dtype=float).rolling(window, min_periods=1).mean()
+    visible = [
+        i for i, t in enumerate(xs)
+        if (start is None or t >= start) and (end is None or t <= end)
+    ]
+    return (
+        [xs[i] for i in visible],
+        [ys[i] for i in visible],
+        smoothed.iloc[visible].tolist(),
+    )
