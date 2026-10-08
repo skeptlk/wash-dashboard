@@ -423,6 +423,15 @@ def _control_panel() -> rx.Component:
 def _results_panel() -> rx.Component:
     return rx.vstack(
         rx.cond(
+            EgtState.chart_error != "",
+            rx.callout(
+                EgtState.chart_error,
+                icon="triangle_alert",
+                color_scheme="red",
+                width="100%",
+            ),
+        ),
+        rx.cond(
             EgtState.is_computing,
             rx.center(
                 rx.hstack(

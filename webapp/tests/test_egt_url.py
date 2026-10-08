@@ -6,10 +6,12 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import types
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+import numpy as np
 import pytest
 import reflex as rx
 from reflex.istate.data import ReflexURL, RouterData
@@ -60,7 +62,7 @@ def test_url_restores_engine_dates_and_precise_zoom(modules):
         state.available_engines_labeled = [{"id": "888797", "label": "Engine"}]
         with patch.object(egt.EgtState, "get_state", AsyncMock(return_value=gs)), \
              patch.object(egt.EgtState, "_build_engine_list"), \
-             patch.object(egt.EgtState, "_build_chart", AsyncMock()):
+             patch.object(egt.EgtChartRequest, "build", Mock()):
             _ = [update async for update in state.on_load()]
             assert state.selected_engine_id == "888797"
             assert (gs.start_date, gs.end_date) == ("2025-01-01", "2025-12-31")
@@ -74,7 +76,6 @@ def test_url_restores_engine_dates_and_precise_zoom(modules):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("fails", [False, True])
 @pytest.mark.parametrize("handler,args,field,expected", [
     ("toggle_param", ("IAI@TAKEOFF", True), "selected_params", ["IAI@TAKEOFF"]),
     ("toggle_param", ("EGTHDM@TAKEOFF", False), "selected_params", []),
@@ -84,7 +85,7 @@ def test_url_restores_engine_dates_and_precise_zoom(modules):
     ("set_start_date", ("2025-01-15",), "start_date", "2025-01-15"),
     ("set_end_date", ("2025-12-15",), "end_date", "2025-12-15"),
 ])
-def test_filters_publish_values_before_build(modules, fails, handler, args, field, expected):
+def test_filters_finish_before_background_build(modules, handler, args, field, expected):
     egt, base, _ = modules
 
     async def run():
@@ -93,24 +94,23 @@ def test_filters_publish_values_before_build(modules, fails, handler, args, fiel
         state.selected_engine_id = "888797"
         state.selected_params = ["EGTHDM@TAKEOFF"] if args == ("EGTHDM@TAKEOFF", False) else []
         state.label_mode = True
-        build = AsyncMock(side_effect=RuntimeError("build failed") if fails else None)
+        build = Mock()
         with patch.object(egt.EgtState, "get_state", AsyncMock(return_value=gs)), \
-             patch.object(egt.EgtState, "_build_chart", build):
-            event = getattr(state, handler)(*args)
-            assert await anext(event) is None
+             patch.object(egt.EgtChartRequest, "build", build):
+            events = [update async for update in getattr(state, handler)(*args)]
+            assert events[0] == egt.EgtState.rebuild_chart
             target = gs if field in ("start_date", "end_date") else state
             assert getattr(target, field) == expected
             assert state.is_computing
             if handler == "set_version":
                 assert not state.label_mode
-            build.assert_not_awaited()
-            if fails:
-                with pytest.raises(RuntimeError, match="build failed"):
-                    _ = [update async for update in event]
-            else:
-                _ = [update async for update in event]
-            build.assert_awaited_once()
-            assert not state.is_computing
+            build.assert_not_called()
+            assert state._chart_worker_running
+            # A second change updates controls but reuses the queued worker.
+            _ = [update async for update in state.toggle_param("AGW@TAKEOFF", True)]
+            assert "AGW@TAKEOFF" in state.selected_params
+            assert _ == []
+            build.assert_not_called()
 
     asyncio.run(run())
 
@@ -120,13 +120,13 @@ def test_label_mode_only_updates_drag_mode(modules):
     state = egt.EgtState(_reflex_internal_init=True)
     state.selected_engine_id = "888797"
     state.chart_figure.add_scatter(x=[1, 2], y=[3, 4])
-    with patch.object(egt.EgtState, "_build_chart", AsyncMock()) as build:
+    with patch.object(egt.EgtChartRequest, "build", Mock()) as build:
         for value, mode in ((True, "select"), (False, "zoom")):
             state.toggle_label_mode(value)
             assert state.label_mode == value
             assert state.chart_figure.layout.dragmode == mode
             assert list(state.chart_figure.data[0].y) == [3, 4]
-        build.assert_not_awaited()
+        build.assert_not_called()
 
 
 @pytest.mark.parametrize("xs", [
@@ -188,30 +188,109 @@ def test_page_compiles_relayout_payload_and_multiline_labels(modules):
     assert "new WeakMap()" in compiled
 
 
-@pytest.mark.parametrize("fails", [False, True])
-def test_engine_selection_yields_loading_before_build_and_clears_it(modules, fails):
+def test_engine_selection_queues_build_and_syncs_url(modules):
     egt, base, _ = modules
 
     async def run():
         state = egt.EgtState(_reflex_internal_init=True)
         gs = base.GlobalState(_reflex_internal_init=True)
-        build = AsyncMock(side_effect=RuntimeError("build failed") if fails else None)
         with patch.object(egt.EgtState, "get_state", AsyncMock(return_value=gs)), \
-             patch.object(egt.EgtState, "_build_chart", build):
-            event = state.select_engine("888797")
-            assert await anext(event) is None
+             patch.object(egt.EgtChartRequest, "build", Mock()) as build:
+            events = [update async for update in state.select_engine("888797")]
+            assert events[0] == egt.EgtState.rebuild_chart
+            assert len(events) == 2  # Background task and URL synchronization.
             assert state.selected_engine_id == "888797"
             assert state.is_computing
-            build.assert_not_awaited()
-            if fails:
-                with pytest.raises(RuntimeError, match="build failed"):
-                    await anext(event)
-            else:
-                assert await anext(event) is not None  # URL synchronization
-                with pytest.raises(StopAsyncIteration):
-                    await anext(event)
-            build.assert_awaited_once()
+            build.assert_not_called()
+
+    asyncio.run(run())
+
+
+class BackgroundState:
+    """StateProxy-like lock for exercising the actual background event function."""
+
+    def __init__(self, state):
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "lock", asyncio.Lock())
+
+    def __getattr__(self, name):
+        return getattr(self.state, name)
+
+    def __setattr__(self, name, value):
+        setattr(self.state, name, value)
+
+    async def __aenter__(self):
+        await self.lock.acquire()
+        return self
+
+    async def __aexit__(self, *args):
+        self.lock.release()
+
+
+@pytest.mark.parametrize("stale_fails", [False, True])
+def test_background_build_keeps_controls_live_and_discards_stale_results(modules, stale_fails):
+    egt, base, _ = modules
+
+    async def run():
+        state = egt.EgtState(_reflex_internal_init=True)
+        gs = base.GlobalState(_reflex_internal_init=True)
+        state.selected_engine_id = "888797"
+        state.selected_params = []
+        started, release = threading.Event(), threading.Event()
+        requests = []
+
+        def build(request):
+            requests.append(request)
+            if len(requests) == 1:
+                started.set()
+                assert release.wait(3), "Controls were blocked by the chart build"
+                if stale_fails:
+                    raise RuntimeError("stale failure")
+            return egt.go.Figure(layout={"title": str(request.model_params["smoothing_window"])}), ""
+
+        with patch.object(egt.EgtState, "get_state", AsyncMock(return_value=gs)), \
+             patch.object(egt.EgtChartRequest, "build", build):
+            _ = [event async for event in state._refresh_chart()]
+            worker = asyncio.create_task(egt.EgtState.rebuild_chart.fn(BackgroundState(state)))
+            try:
+                assert await asyncio.to_thread(started.wait, 2)
+                # These complete while the old build is still waiting in its thread.
+                async with asyncio.timeout(1):
+                    _ = [event async for event in state.toggle_param("IAI@TAKEOFF", True)]
+                    _ = [event async for event in state.set_model_param("smoothing_window", "40")]
+                assert "IAI@TAKEOFF" in state.selected_params
+                assert state.smoothing_window == 40
+                assert state.chart_figure.layout.title.text is None
+                assert state.is_computing
+            finally:
+                release.set()
+            await asyncio.wait_for(worker, 3)
+            assert len(requests) == 2
+            assert requests[0].model_params["smoothing_window"] == 26
+            assert requests[1].model_params["smoothing_window"] == 40
+            assert state.chart_figure.layout.title.text == "40"
             assert not state.is_computing
+            assert not state._chart_worker_running
+            assert not state.chart_error
+
+    asyncio.run(run())
+
+
+def test_background_build_failure_clears_loading_and_allows_retry(modules):
+    egt, base, _ = modules
+
+    async def run():
+        state = egt.EgtState(_reflex_internal_init=True)
+        gs = base.GlobalState(_reflex_internal_init=True)
+        with patch.object(egt.EgtState, "get_state", AsyncMock(return_value=gs)), \
+             patch.object(egt.EgtChartRequest, "build", side_effect=RuntimeError("build failed")):
+            _ = [event async for event in state._refresh_chart()]
+            await egt.EgtState.rebuild_chart.fn(BackgroundState(state))
+        assert "build failed" in state.chart_error
+        assert not state.is_computing
+        assert not state._chart_worker_running
+        assert [event async for event in state._refresh_chart()] == [egt.EgtState.rebuild_chart]
+        assert not state.chart_error
 
     asyncio.run(run())
 
@@ -228,7 +307,7 @@ def test_date_transport_decoder_is_timezone_independent(modules, timezone):
         x=egt.egt_params.plotly_timestamps([
             "2022-03-02 20:12:15", None, "2025-10-08 16:47:34.123456",
         ]),
-        y=egt.np.array([1.2345678901234567, egt.np.nan, 3.5]),
+        y=np.array([1.2345678901234567, np.nan, 3.5]),
     ))
     wire = json.dumps(serializers.serialize(fig))
     code = page._DATE_FIGURE_JS + "\nconst original = " + wire + ";\n" + """
