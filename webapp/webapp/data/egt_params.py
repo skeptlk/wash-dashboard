@@ -36,6 +36,10 @@ DEGT_CRUISE_ID = "DEGT@CRUISE"
 
 _CATALOG_CACHE: dict[int, list[dict]] = {}
 
+# Source frames are immutable after loading. Keep one positional index per
+# phase, shared by all parameters; rebuild if the source frame is replaced.
+_ENGINE_ROWS: dict[str, tuple[pd.DataFrame, dict]] = {}
+
 
 def line_with_gaps(xs: list, ys: list) -> tuple[list, list, list[tuple]]:
     """Break a displayed curve across gaps of at least seven days.
@@ -85,14 +89,23 @@ def series_for(
     end: Optional[datetime] = None,
 ) -> tuple[list, list]:
     """Time-sorted ``(datetimes, values)`` for one engine + one catalog entry."""
-    df = getattr(bundle, entry["df_attr"])
+    df_attr = entry["df_attr"]
+    df = getattr(bundle, df_attr)
     col = entry["column"]
-    mask = (df["engine_id"] == engine_id) & df[col].notna()
+    cached = _ENGINE_ROWS.get(df_attr)
+    if cached is None or cached[0] is not df:
+        cached = (df, df.groupby("engine_id", sort=False).indices)
+        _ENGINE_ROWS[df_attr] = cached
+    rows = cached[1].get(engine_id)
+    if rows is None:
+        return [], []
+    sub = df.iloc[rows, df.columns.get_indexer(["flight_datetime", col])]
+    mask = sub[col].notna()
     if start is not None:
-        mask &= df["flight_datetime"] >= start
+        mask &= sub["flight_datetime"] >= start
     if end is not None:
-        mask &= df["flight_datetime"] <= end
-    sub = df.loc[mask, ["flight_datetime", col]].sort_values("flight_datetime")
+        mask &= sub["flight_datetime"] <= end
+    sub = sub.loc[mask].sort_values("flight_datetime")
     return sub["flight_datetime"].tolist(), sub[col].tolist()
 
 

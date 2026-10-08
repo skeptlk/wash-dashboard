@@ -90,6 +90,7 @@ class EgtState(rx.State):
     params_open: bool = False
 
     has_chart: bool = False
+    is_computing: bool = False
     chart_figure: go.Figure = go.Figure()
 
     # --- Data-labeling state ---
@@ -267,9 +268,14 @@ class EgtState(rx.State):
     @rx.event
     async def select_engine(self, engine_id: str):
         self.selected_engine_id = engine_id
-        self._refresh_labels()
-        await self._build_chart()
-        return await self._sync_url()
+        self.is_computing = True
+        yield
+        try:
+            self._refresh_labels()
+            await self._build_chart()
+        finally:
+            self.is_computing = False
+        yield await self._sync_url()
 
     async def _sync_url(self):
         gs = await self.get_state(GlobalState)

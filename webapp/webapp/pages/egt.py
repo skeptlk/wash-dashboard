@@ -382,6 +382,21 @@ def _control_panel() -> rx.Component:
 def _results_panel() -> rx.Component:
     return rx.vstack(
         rx.cond(
+            EgtState.is_computing,
+            rx.center(
+                rx.hstack(
+                    rx.spinner(size="3"),
+                    rx.text("Updating chart…", size="2"),
+                    align="center",
+                    role="status",
+                ),
+                position="absolute",
+                inset="0",
+                background_color="var(--color-overlay)",
+                z_index="1",
+            ),
+        ),
+        rx.cond(
             EgtState.version_error != "",
             rx.callout(
                 EgtState.version_error,
@@ -419,6 +434,7 @@ def _results_panel() -> rx.Component:
         ),
         spacing="4",
         align="stretch",
+        position="relative",
         width="100%",
         min_width="0",
         height=rx.breakpoints(initial="75dvh", md="100%"),

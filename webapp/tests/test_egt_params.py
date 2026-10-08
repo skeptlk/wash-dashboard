@@ -80,3 +80,32 @@ def test_line_breaks_at_week_long_gaps_without_changing_observations():
     assert times[2] == pd.Timestamp("2025-01-14 23:59:59")
     assert values == [1, 2, 3, 4, 5]
     assert egt_params.line_with_gaps([], []) == ([], [], [])
+
+
+def test_indexed_series_preserves_filtering_and_handles_replaced_sources():
+    times = pd.date_range("2025-01-01 12:34:56", periods=4, freq="D")
+    source = pd.DataFrame({
+        "engine_id": ["E1", "E2", "E1", "E1", "E1"],
+        "flight_datetime": [times[3], times[1], times[0], times[2], times[1]],
+        "egthdm": [40.0, 999.0, 10.0, None, 20.0],
+        "degt": [4.0, 999.0, 1.0, 3.0, 2.0],
+    }, index=[7, 7, 3, 3, 1])
+    bundle = SimpleNamespace(takeoff_df=source, cruise_df=source.copy())
+    original = source.copy(deep=True)
+    for attr in ("takeoff_df", "cruise_df"):
+        for col in ("egthdm", "degt"):
+            entry = {"df_attr": attr, "column": col}
+            for eid in ("E1", "E2", "missing"):
+                for start, end in ((None, None), (times[1], times[3])):
+                    mask = (source.engine_id == eid) & source[col].notna()
+                    if start is not None:
+                        mask &= source.flight_datetime.between(start, end)
+                    expected = source.loc[mask].sort_values("flight_datetime")
+                    assert egt_params.series_for(bundle, eid, entry, start, end) == (
+                        expected.flight_datetime.tolist(), expected[col].tolist(),
+                    )
+    pd.testing.assert_frame_equal(source, original)
+    bundle.takeoff_df = source.iloc[[1]].assign(engine_id="E1")
+    assert egt_params.series_for(
+        bundle, "E1", {"df_attr": "takeoff_df", "column": "egthdm"},
+    ) == ([times[1]], [999.0])

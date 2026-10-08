@@ -97,3 +97,33 @@ def test_page_compiles_relayout_payload_and_multiline_labels(modules):
     assert "onRelayout" in rendered
     assert "pre-line" in rendered
     assert "on_plot_relayout" in rendered
+    assert "Updating chart" in rendered
+    assert "is_computing" in rendered
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_engine_selection_yields_loading_before_build_and_clears_it(modules, fails):
+    egt, base, _ = modules
+
+    async def run():
+        state = egt.EgtState(_reflex_internal_init=True)
+        gs = base.GlobalState(_reflex_internal_init=True)
+        build = AsyncMock(side_effect=RuntimeError("build failed") if fails else None)
+        with patch.object(egt.EgtState, "get_state", AsyncMock(return_value=gs)), \
+             patch.object(egt.EgtState, "_build_chart", build):
+            event = state.select_engine("888797")
+            assert await anext(event) is None
+            assert state.selected_engine_id == "888797"
+            assert state.is_computing
+            build.assert_not_awaited()
+            if fails:
+                with pytest.raises(RuntimeError, match="build failed"):
+                    await anext(event)
+            else:
+                assert await anext(event) is not None  # URL synchronization
+                with pytest.raises(StopAsyncIteration):
+                    await anext(event)
+            build.assert_awaited_once()
+            assert not state.is_computing
+
+    asyncio.run(run())
