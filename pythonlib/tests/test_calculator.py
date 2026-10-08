@@ -147,6 +147,23 @@ class TestWashCalculator:
         assert summaries[0].event_index == 1
         assert summaries[1].event_index == 2
 
+    def test_washes_sharing_flight_anchor_are_kept_separate(self):
+        """Each maintenance record produces an event even when anchors coincide."""
+        flights = make_flights("ENG004", 100, [5.0, 7.0, 4.0, 6.0])
+        maint = make_maintenance(
+            "ENG004",
+            ["2024-02-20", "2024-02-20"],
+            ["330", "331"],
+        )
+
+        calc = WashCalculator(WashConfig(smooth_window=5, n_obs_mean=5))
+        summaries = calc.process(flights, maint, GWFM)
+
+        assert len(summaries) == len(maint)
+        assert [s.event_index for s in summaries] == [1, 2]
+        assert [s.ata_code for s in summaries] == ["330", "331"]
+        assert summaries[0].results[0].delta == summaries[1].results[0].delta
+
     def test_summary_structure(self):
         """Summaries contain expected fields and nested WashEvent results."""
         flights = make_flights("ENG005", 80, [5.0, 7.0, 4.0, 6.0])

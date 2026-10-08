@@ -86,7 +86,7 @@ class WashCalculator:
             eng_maint = maint_groups[engine_id]
             df = self._prepare_data(eng_flights, eng_maint)
             events = self._compute_deltas(
-                df, engine_id, parameter, utilization_lookup
+                df, eng_maint, engine_id, parameter, utilization_lookup
             )
             engine_results.append((engine_id, df))
             all_events.extend(events)
@@ -247,13 +247,14 @@ class WashCalculator:
     def _compute_deltas(
         self,
         eng_df: pd.DataFrame,
+        eng_maintenance: pd.DataFrame,
         engine_id: str,
         parameter: WashParameter,
         utilization_lookup: UtilizationLookup | None = None,
     ) -> list[WashEvent]:
         """Compute before/after deltas and detect loss-of-efficiency for one engine."""
         events: list[WashEvent] = []
-        if eng_df.empty:
+        if eng_df.empty or eng_maintenance.empty:
             return events
         lookup: UtilizationLookup = utilization_lookup or {}
 
@@ -261,9 +262,23 @@ class WashCalculator:
         smooth_values = eng_df["float_value_smooth_custom"]
         time_values = eng_df["flight_datetime"]
         cart = parameter.direction
-        max_seg = eng_df["event_cum"].max()
 
-        for seg in range(1, max_seg + 1):
+        maint = eng_maintenance.copy()
+        if maint["maint_datetime"].dt.tz is not None:
+            maint["maint_datetime"] = (
+                maint["maint_datetime"].dt.tz_convert("UTC").dt.tz_localize(None)
+            )
+
+        for event_index, (_, wash) in enumerate(
+            maint.sort_values("maint_datetime", kind="stable").iterrows(), start=1
+        ):
+            mdt = wash["maint_datetime"]
+            after_mask = time_values >= mdt
+            if not after_mask.any():
+                continue
+
+            anchor_idx = eng_df.index[after_mask][0]
+            seg = int(eng_df.loc[anchor_idx, "event_cum"])
             prev_idx = seg_indices.get(seg - 1)
             curr_idx = seg_indices.get(seg)
 
@@ -296,13 +311,8 @@ class WashCalculator:
                 cart,
             )
 
-            # Maint metadata sits on the first flight of the segment (the anchor row)
-            maint_anchor_row = eng_df.query('not ata_code.isna() and event_cum == @seg').iloc[0]
-            maint_dt = None
-            ata = None
-            if maint_anchor_row is not None:
-                maint_dt = maint_anchor_row["maint_datetime"].to_pydatetime()
-                ata = maint_anchor_row["ata_code"]
+            maint_dt = mdt.to_pydatetime()
+            ata = wash.get("ata_code", None)
 
             time_loe_dt: datetime | None = (
                 time_loe.to_pydatetime() if time_loe is not None else None
@@ -324,7 +334,7 @@ class WashCalculator:
             events.append(
                 WashEvent(
                     engine_id=engine_id,
-                    event_index=seg,
+                    event_index=event_index,
                     maint_datetime=maint_dt,
                     ata_code=ata,
                     parameter=parameter,

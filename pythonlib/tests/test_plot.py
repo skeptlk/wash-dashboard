@@ -118,6 +118,22 @@ class TestBuildPlot:
             <= m.after_segment.end_datetime
         )
 
+    def test_close_washes_have_separate_markers(self):
+        flights = _flights("ENG001", np.linspace(5.0, 7.0, 100))
+        maint = [
+            MaintenanceRecord("ENG001", datetime(2024, 2, 20), "330"),
+            MaintenanceRecord("ENG001", datetime(2024, 2, 20), "331"),
+        ]
+
+        calc = WashCalculator(WashConfig(smooth_window=5, n_obs_mean=5))
+        plot = calc.build_plot(flights, maint, GWFM)
+
+        assert [m.event_index for m in plot.markers] == [1, 2]
+        assert (
+            plot.markers[0].wash_event_point.flight_datetime
+            == plot.markers[1].wash_event_point.flight_datetime
+        )
+
     def test_loss_of_efficiency_point_when_detected(self):
         pre = np.linspace(7.0, 7.0, 30)
         dip = np.linspace(4.0, 4.0, 10)
@@ -154,4 +170,3 @@ class TestBuildPlot:
         assert len(plot.curves) == 6
         engines_with_raw = {c.engine_id for c in plot.curves if c.kind == "raw"}
         assert engines_with_raw == {"ENG001", "ENG002"}
-
