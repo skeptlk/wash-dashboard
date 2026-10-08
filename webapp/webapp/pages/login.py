@@ -67,6 +67,11 @@ def login_page() -> rx.Component:
                                 width="100%",
                                 cursor="pointer",
                             ),
+                            rx.text(
+                                "You’ll stay signed in on this browser until you sign out.",
+                                size="1",
+                                color="var(--gray-10)",
+                            ),
                             spacing="3",
                             align="stretch",
                             width="100%",

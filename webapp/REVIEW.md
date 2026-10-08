@@ -6,14 +6,11 @@ dataset changes.
 
 ## Remaining findings
 
-1. **High: authentication is only a page-load redirect.**
-   `webapp/state/auth.py:30` redirects unauthenticated visitors, but sensitive
-   events such as `EgtState.apply_label`, `delete_label`, and `export_dataset`
-   do not check authentication. `webapp/webapp.py` has no central event guard.
-   Backend events need an authorization check before reading or modifying data;
-   hiding controls or navigating to `/login` does not enforce that check.
-   The shared password also defaults to the public literal `ecm` when
-   `APP_PASSWORD` is missing (`webapp/state/auth.py:9`).
+1. **Resolved 2026-10-08: authentication was only a page-load redirect.**
+   `AuthMiddleware` now checks a signed browser token before dashboard events,
+   including label mutations and exports, and excludes dashboard state from
+   initial hydration. The shared test-dashboard default remains `ecm` when
+   `APP_PASSWORD` is missing. See README for persistence and public endpoints.
 
 2. **Medium: date-only end dates exclude most of the final day.**
    The page states parse `YYYY-MM-DD` as midnight and pass it to inclusive

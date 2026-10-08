@@ -19,6 +19,27 @@ the aircraft datasets from the URLs in `webapp/data/registry.py` at startup.
 EGT also needs the baseline from `../egt-failure-dataset`; see that directory's
 README for DVC setup. Imports expose the sibling `pythonlib` automatically.
 
+### Shared login
+
+After entering the shared password, the browser keeps a signed token in
+localStorage (`ew_auth_token`). It has no time limit and survives browser and
+backend restarts, including Reflex session expiry. Sign out clears it and syncs
+the change to other tabs. Clearing site storage, using another browser/profile,
+or changing `APP_PASSWORD` requires a new login. Keep the same password across
+backend workers. If unset, the test-dashboard default remains `ecm`.
+
+The backend checks the token before every dashboard event, including report
+loads, label edits/deletions, exports, and direct WebSocket calls. The initial
+hydration response excludes dashboard state. Login and the framework events
+needed to restore browser storage remain public; the WebSocket connection itself,
+static frontend assets, `/ping`, and `/_health` do not require authentication.
+There are no custom HTTP data routes or upload handlers in this app.
+
+This is a shared test-dashboard login: tokens are bearer credentials, with no
+per-user accounts or individual server-side revocation. Rotating the shared
+password revokes all saved tokens. It does not restrict access to the upstream
+public dataset URLs.
+
 Reflex 0.9.10 production mode serves frontend and backend on one port:
 
 ```bash

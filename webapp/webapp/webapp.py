@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import reflex as rx
 
+from .auth_middleware import AuthMiddleware
 from .pages.analysis import analysis_page
 from .pages.degradation import degradation_page
 from .pages.login import login_page
@@ -21,6 +22,7 @@ app = rx.App(
         rx.el.link(rel="icon", href="/plane.svg", type="image/svg+xml"),
     ],
 )
+app.add_middleware(AuthMiddleware(), index=0)
 app.add_page(
     login_page,
     route="/login",
