@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
+import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
@@ -39,6 +40,20 @@ _CATALOG_CACHE: dict[int, list[dict]] = {}
 # Source frames are immutable after loading. Keep one positional index per
 # phase, shared by all parameters; rebuild if the source frame is replaced.
 _ENGINE_ROWS: dict[str, tuple[pd.DataFrame, dict]] = {}
+
+
+def plotly_timestamps(xs) -> np.ndarray:
+    """Encode chart dates as float64 epoch milliseconds for Plotly typed arrays.
+
+    Naive source dates keep their wall-clock values, independent of the server
+    timezone. NaT/None become NaN so explicit gaps in smoothed lines survive.
+    Only the chart representation changes; model and label data stay untouched.
+    """
+    dates = pd.DatetimeIndex(xs)
+    ns = dates.as_unit("ns").asi8
+    values = (ns // 1_000_000).astype(np.float64) + (ns % 1_000_000) / 1_000_000
+    values[dates.isna()] = np.nan
+    return values
 
 
 def line_with_gaps(xs: list, ys: list) -> tuple[list, list, list[tuple]]:

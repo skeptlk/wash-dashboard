@@ -1,6 +1,10 @@
 """EGT URL restoration and Plotly viewport events, without dataset downloads."""
 import asyncio
 import importlib
+import json
+import os
+import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -125,6 +129,27 @@ def test_label_mode_only_updates_drag_mode(modules):
         build.assert_not_awaited()
 
 
+@pytest.mark.parametrize("xs", [
+    [1646251935000, 1646269638000],
+    ["2022-03-02T20:12:15", "2022-03-03T01:07:18"],
+    [1646251935000, "2022-03-03T01:07:18"],
+])
+def test_selection_accepts_timestamp_milliseconds_and_date_strings(modules, xs):
+    egt, _, _ = modules
+    state = egt.EgtState(_reflex_internal_init=True)
+    state.chart_figure.add_scattergl(x=xs, y=[1, 2], meta="reading")
+    state.chart_figure.add_scatter(x=[0], y=[1], name="Maintenance")
+    state.on_plot_selected([
+        {"x": xs[1], "curveNumber": 0},
+        {"x": xs[0], "curveNumber": 0},
+        {"x": 0, "curveNumber": 1},
+        {"x": "invalid", "curveNumber": 0},
+    ])
+    assert state.label_start == "2022-03-02T20:12:15"
+    assert state.label_end == "2022-03-03T01:07:18"
+    assert state.label_mode
+
+
 def test_zoom_pan_reset_and_unrelated_relayout(modules):
     egt, base, _ = modules
 
@@ -148,12 +173,19 @@ def test_zoom_pan_reset_and_unrelated_relayout(modules):
 
 def test_page_compiles_relayout_payload_and_multiline_labels(modules):
     _, _, page = modules
-    rendered = str(page.egt_page())
+    from reflex.compiler.compiler import compile_page
+
+    component = page.egt_page()
+    rendered = str(component)
     assert "onRelayout" in rendered
     assert "pre-line" in rendered
     assert "on_plot_relayout" in rendered
     assert "Updating chart" in rendered
     assert "is_computing" in rendered
+    assert "egtDateFigure(" in rendered
+    _, compiled = compile_page("egt", component)
+    assert "function egtDateFigure(figure)" in compiled
+    assert "new WeakMap()" in compiled
 
 
 @pytest.mark.parametrize("fails", [False, True])
@@ -182,3 +214,43 @@ def test_engine_selection_yields_loading_before_build_and_clears_it(modules, fai
             assert not state.is_computing
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("timezone", ["UTC", "Europe/Moscow", "America/New_York"])
+def test_date_transport_decoder_is_timezone_independent(modules, timezone):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required for the chart date decoder test")
+    egt, _, page = modules
+    from reflex.utils import serializers
+
+    fig = egt.go.Figure(egt.go.Scattergl(
+        x=egt.egt_params.plotly_timestamps([
+            "2022-03-02 20:12:15", None, "2025-10-08 16:47:34.123456",
+        ]),
+        y=egt.np.array([1.2345678901234567, egt.np.nan, 3.5]),
+    ))
+    wire = json.dumps(serializers.serialize(fig))
+    code = page._DATE_FIGURE_JS + "\nconst original = " + wire + ";\n" + """
+const decoded = egtDateFigure(original);
+console.log(JSON.stringify({
+    x: decoded.data[0].x,
+    cached: egtDateFigure(original) === decoded,
+    originalUnchanged: original.data[0].x.dtype === 'f8',
+    yUnchanged: decoded.data[0].y === original.data[0].y,
+    newFigureDecoded: egtDateFigure({...original}) !== decoded,
+}));
+"""
+    result = subprocess.run(
+        [node, "-e", code], env={**os.environ, "TZ": timezone},
+        capture_output=True, text=True, check=True,
+    )
+    decoded = json.loads(result.stdout)
+    assert decoded["x"][0] == "2022-03-02T20:12:15.000"
+    assert decoded["x"][1] is None
+    assert abs(egt.pd.Timestamp(decoded["x"][2]) - egt.pd.Timestamp(
+        "2025-10-08 16:47:34.123456"
+    )) < egt.pd.Timedelta(microseconds=1)
+    assert all(decoded[key] for key in (
+        "cached", "originalUnchanged", "yUnchanged", "newFigureDecoded",
+    ))

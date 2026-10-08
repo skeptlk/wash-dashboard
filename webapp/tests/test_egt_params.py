@@ -1,11 +1,15 @@
 """Regression coverage for the curve shown under EGT model predictions."""
 
 import importlib.util
+import base64
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import pytest
+from reflex.utils import serializers
 
 from enginewash import FlightPhase, FlightRecord, predict_egt_failure_enhanced
 
@@ -15,6 +19,29 @@ _spec = importlib.util.spec_from_file_location(
 )
 egt_params = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(egt_params)
+
+
+def test_plotly_typed_arrays_preserve_dates_values_and_gaps():
+    dates = list(pd.to_datetime([
+        "2022-03-02 20:12:15", "2025-10-08 16:47:34.123456",
+    ], format="mixed"))
+    xs = egt_params.plotly_timestamps([dates[0], None, dates[1]])
+    ys = np.array([1.2345678901234567, np.nan, -987.6543210987654])
+    fig = go.Figure(go.Scatter(x=xs, y=ys, connectgaps=False))
+    fig.update_xaxes(type="date")
+    wire = serializers.serialize(fig)
+    for key, expected in (("x", xs), ("y", ys)):
+        encoded = wire["data"][0][key]
+        assert encoded["dtype"] == "f8"
+        decoded = np.frombuffer(base64.b64decode(encoded["bdata"]), dtype="<f8")
+        np.testing.assert_array_equal(decoded, expected)
+    assert xs[0] == 1646251935000
+    assert np.isnan(xs[1])
+    restored = pd.to_datetime(xs[[0, 2]], unit="ms")
+    assert max(abs(restored - pd.DatetimeIndex(dates))) < pd.Timedelta(microseconds=1)
+    assert wire["layout"]["xaxis"]["type"] == "date"
+    assert wire["data"][0]["connectgaps"] is False
+    assert egt_params.plotly_timestamps([]).size == 0
 
 
 @pytest.mark.parametrize("window", [3, 26, 40])

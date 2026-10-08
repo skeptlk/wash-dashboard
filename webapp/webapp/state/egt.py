@@ -10,6 +10,7 @@ import json
 import re
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import reflex as rx
@@ -392,7 +393,13 @@ class EgtState(rx.State):
         ]
         if not xs:
             return
-        ts = pd.to_datetime(pd.Series(xs), errors="coerce").dropna()
+        # Plotly versions/traces can return date strings or epoch milliseconds.
+        # Pandas otherwise interprets numeric coordinates as nanoseconds.
+        ts = pd.Series([
+            pd.to_datetime(x, unit="ms", errors="coerce")
+            if isinstance(x, (int, float)) else pd.to_datetime(x, errors="coerce")
+            for x in xs
+        ]).dropna()
         if ts.empty:
             return
         # Keep full precision so the exact drag boundaries are stored (the inputs
@@ -569,8 +576,8 @@ class EgtState(rx.State):
 
             fig.add_trace(
                 go.Scattergl(
-                    x=xs,
-                    y=ys,
+                    x=egt_params.plotly_timestamps(xs),
+                    y=np.asarray(ys, dtype=np.float64),
                     mode="markers",
                     name="Actual",
                     legendgroup="readings",
@@ -588,8 +595,8 @@ class EgtState(rx.State):
             line_x, line_y, gaps = egt_params.line_with_gaps(xs, smoothed)
             fig.add_trace(
                 go.Scatter(
-                    x=line_x,
-                    y=line_y,
+                    x=egt_params.plotly_timestamps(line_x),
+                    y=np.asarray(line_y, dtype=np.float64),
                     connectgaps=False,
                     mode="lines",
                     name=f"Smoothed (window={self.smoothing_window})",
@@ -624,8 +631,8 @@ class EgtState(rx.State):
                     px, py = zip(*visible)
                     fig.add_trace(
                         go.Scatter(
-                            x=list(px),
-                            y=list(py),
+                            x=egt_params.plotly_timestamps(px),
+                            y=np.asarray(py, dtype=np.float64),
                             mode="markers",
                             name="Prediction",
                             hovertemplate="%{x|%d.%m.%y, %H:%M:%S}<br>Predicted failure: %{y:.2f}<extra></extra>",
@@ -664,7 +671,7 @@ class EgtState(rx.State):
             for i in range(1, nrows + 1):
                 fig.add_trace(
                     go.Scatter(
-                        x=[dt for dt, _ in points],
+                        x=egt_params.plotly_timestamps([dt for dt, _ in points]),
                         y=[position] * len(points),
                         customdata=[text for _, text in points],
                         mode="markers",
@@ -739,6 +746,7 @@ class EgtState(rx.State):
             dragmode="select" if self.label_mode else "zoom",
         )
         fig.update_xaxes(
+            type="date",
             tickformat="%d.%m.%y", showticklabels=True, domain=[0, 1],
             range=[self.timeline_start, self.timeline_end] if self.timeline_start else None,
             autorange=not bool(self.timeline_start),
