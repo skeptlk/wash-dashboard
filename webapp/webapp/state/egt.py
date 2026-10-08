@@ -163,13 +163,15 @@ class EgtState(rx.State):
             selected.append(param_id)
         self.selected_params = selected
         if self.selected_engine_id:
-            await self._build_chart()
+            async for update in self._refresh_chart():
+                yield update
 
     @rx.event
     async def reset_params(self):
         self.selected_params = list(egt_params.DEFAULT_PARAMS)
         if self.selected_engine_id:
-            await self._build_chart()
+            async for update in self._refresh_chart():
+                yield update
 
     def _build_engine_list(self) -> None:
         """Engines that have predictions AND exist in the Boeing bundle.
@@ -214,7 +216,8 @@ class EgtState(rx.State):
             return
         setattr(self, field, new_value)
         if self.selected_engine_id:
-            await self._build_chart()
+            async for update in self._refresh_chart():
+                yield update
 
     def _refresh_versions(self) -> None:
         """Rebuild the version dropdown: Working (live) + committed snapshots."""
@@ -234,7 +237,8 @@ class EgtState(rx.State):
             # Past versions are read-only; leave label mode off.
             self.label_mode = False
         if self.selected_engine_id:
-            await self._build_chart()
+            async for update in self._refresh_chart():
+                yield update
 
     @rx.event
     async def on_load(self):
@@ -262,19 +266,16 @@ class EgtState(rx.State):
             self.selected_engine_id = self.available_engines_labeled[0]["id"]
         if self.selected_engine_id:
             self._refresh_labels()
-            await self._build_chart()
-        return await self._sync_url()
+            async for update in self._refresh_chart():
+                yield update
+        yield await self._sync_url()
 
     @rx.event
     async def select_engine(self, engine_id: str):
         self.selected_engine_id = engine_id
-        self.is_computing = True
-        yield
-        try:
-            self._refresh_labels()
-            await self._build_chart()
-        finally:
-            self.is_computing = False
+        self._refresh_labels()
+        async for update in self._refresh_chart():
+            yield update
         yield await self._sync_url()
 
     async def _sync_url(self):
@@ -310,16 +311,19 @@ class EgtState(rx.State):
         setattr(gs, field, value)
         self.timeline_start = self.timeline_end = ""
         if self.selected_engine_id:
-            await self._build_chart()
-        return await self._sync_url()
+            async for update in self._refresh_chart():
+                yield update
+        yield await self._sync_url()
 
     @rx.event
     async def set_start_date(self, value: str):
-        return await self._set_date("start_date", value)
+        async for update in self._set_date("start_date", value):
+            yield update
 
     @rx.event
     async def set_end_date(self, value: str):
-        return await self._set_date("end_date", value)
+        async for update in self._set_date("end_date", value):
+            yield update
 
     @rx.event
     async def on_plot_relayout(self, data: dict):
@@ -353,10 +357,9 @@ class EgtState(rx.State):
             self.manual_labels = []
 
     @rx.event
-    async def toggle_label_mode(self, value: bool):
+    def toggle_label_mode(self, value: bool):
         self.label_mode = value
-        if self.selected_engine_id:
-            await self._build_chart()
+        self.chart_figure.update_layout(dragmode="select" if value else "zoom")
 
     @rx.event
     def set_label_start(self, value: str):
@@ -425,14 +428,16 @@ class EgtState(rx.State):
                 f"as failure={self.label_value}."
             )
         self._refresh_labels()
-        await self._build_chart()
+        async for update in self._refresh_chart():
+            yield update
 
     @rx.event
     async def delete_label(self, row_id: str):
         labels_store.delete_label(row_id)
         self.export_status = "Label removed."
         self._refresh_labels()
-        await self._build_chart()
+        async for update in self._refresh_chart():
+            yield update
 
     @rx.event
     def export_dataset(self):
@@ -499,6 +504,15 @@ class EgtState(rx.State):
             decline_min_downward_fraction=self.decline_min_downward_fraction,
             decline_min_r2=self.decline_min_r2,
         )
+
+    async def _refresh_chart(self):
+        """Publish changed controls and the loading overlay before rebuilding."""
+        self.is_computing = True
+        yield
+        try:
+            await self._build_chart()
+        finally:
+            self.is_computing = False
 
     async def _build_chart(self):
         bundle = LOADED.get(_AIRCRAFT_TYPE)

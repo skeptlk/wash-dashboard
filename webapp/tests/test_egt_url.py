@@ -57,17 +57,72 @@ def test_url_restores_engine_dates_and_precise_zoom(modules):
         with patch.object(egt.EgtState, "get_state", AsyncMock(return_value=gs)), \
              patch.object(egt.EgtState, "_build_engine_list"), \
              patch.object(egt.EgtState, "_build_chart", AsyncMock()):
-            await state.on_load()
+            _ = [update async for update in state.on_load()]
             assert state.selected_engine_id == "888797"
             assert (gs.start_date, gs.end_date) == ("2025-01-01", "2025-12-31")
             assert state.timeline_start == "2025-02-01T12:34:56"
             assert state.timeline_end == "2025-03-01T01:02:03"
-            await state.set_start_date("2025-01-15")
+            _ = [update async for update in state.set_start_date("2025-01-15")]
             assert not state.timeline_start
             assert gs.start_date == "2025-01-15"
-            await state.set_start_date("2025-99-99")
+            _ = [update async for update in state.set_start_date("2025-99-99")]
             assert gs.start_date == "2025-01-15"
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("fails", [False, True])
+@pytest.mark.parametrize("handler,args,field,expected", [
+    ("toggle_param", ("IAI@TAKEOFF", True), "selected_params", ["IAI@TAKEOFF"]),
+    ("toggle_param", ("EGTHDM@TAKEOFF", False), "selected_params", []),
+    ("reset_params", (), "selected_params", ["EGTHDM@TAKEOFF", "DEGT@CRUISE", "GWFM@CRUISE"]),
+    ("set_model_param", ("smoothing_window", "40"), "smoothing_window", 40),
+    ("set_version", ("snapshot",), "selected_version", "snapshot"),
+    ("set_start_date", ("2025-01-15",), "start_date", "2025-01-15"),
+    ("set_end_date", ("2025-12-15",), "end_date", "2025-12-15"),
+])
+def test_filters_publish_values_before_build(modules, fails, handler, args, field, expected):
+    egt, base, _ = modules
+
+    async def run():
+        state = egt.EgtState(_reflex_internal_init=True)
+        gs = base.GlobalState(_reflex_internal_init=True)
+        state.selected_engine_id = "888797"
+        state.selected_params = ["EGTHDM@TAKEOFF"] if args == ("EGTHDM@TAKEOFF", False) else []
+        state.label_mode = True
+        build = AsyncMock(side_effect=RuntimeError("build failed") if fails else None)
+        with patch.object(egt.EgtState, "get_state", AsyncMock(return_value=gs)), \
+             patch.object(egt.EgtState, "_build_chart", build):
+            event = getattr(state, handler)(*args)
+            assert await anext(event) is None
+            target = gs if field in ("start_date", "end_date") else state
+            assert getattr(target, field) == expected
+            assert state.is_computing
+            if handler == "set_version":
+                assert not state.label_mode
+            build.assert_not_awaited()
+            if fails:
+                with pytest.raises(RuntimeError, match="build failed"):
+                    _ = [update async for update in event]
+            else:
+                _ = [update async for update in event]
+            build.assert_awaited_once()
+            assert not state.is_computing
+
+    asyncio.run(run())
+
+
+def test_label_mode_only_updates_drag_mode(modules):
+    egt, _, _ = modules
+    state = egt.EgtState(_reflex_internal_init=True)
+    state.selected_engine_id = "888797"
+    state.chart_figure.add_scatter(x=[1, 2], y=[3, 4])
+    with patch.object(egt.EgtState, "_build_chart", AsyncMock()) as build:
+        for value, mode in ((True, "select"), (False, "zoom")):
+            state.toggle_label_mode(value)
+            assert state.label_mode == value
+            assert state.chart_figure.layout.dragmode == mode
+            assert list(state.chart_figure.data[0].y) == [3, 4]
+        build.assert_not_awaited()
 
 
 def test_zoom_pan_reset_and_unrelated_relayout(modules):
