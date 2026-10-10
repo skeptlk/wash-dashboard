@@ -87,7 +87,7 @@ previous observations stay in the browser. A loading counter remains visible
 until all rows arrive. Stale acknowledgements from an earlier selection are ignored.
 
 Constructor keeps the engine/type (`engine`), date range (`start`, `end`), ordered
-parameter selection (`params`, comma-separated), smoothing window (`smoothing`),
+parameter selection (`params`, comma-separated), Smooth window (`smoothing`),
 and horizontal chart viewport (`x_start`, `x_end`) in the URL. Reloading or sharing
 the link restores those settings. Empty date bounds and an empty parameter
 selection are preserved. Changing the date range resets the viewport; zooming or

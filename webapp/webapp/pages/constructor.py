@@ -70,7 +70,7 @@ def _controls():
             spacing="1",
         ),
         rx.hstack(
-            rx.text("Smoothing window", size="1"),
+            rx.text("Smooth window", size="1"),
             rx.spacer(),
             rx.input(
                 type="number",
@@ -99,7 +99,7 @@ def _controls():
                 width="100%",
             ),
             rx.input(
-                placeholder="Search parameters…",
+                placeholder="Parameter name",
                 value=State.param_search,
                 on_change=State.set_param_search,
                 size="1",
@@ -122,7 +122,7 @@ def _controls():
         rx.vstack(
             rx.text("Engine", size="2", weight="medium"),
             rx.input(
-                placeholder="Search engine / aircraft…",
+                placeholder="Engine or aircraft",
                 value=State.engine_search,
                 on_change=State.set_engine_search,
                 size="1",

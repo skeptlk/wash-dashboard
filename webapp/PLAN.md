@@ -81,7 +81,7 @@ Pages access `GlobalState` via `self.get_state(GlobalState)` so shared selectors
 
 ### Page 2 — Wash Analysis (`/analysis`) — *Phase 2*
 
-- Controls: aircraft type, engine multi-select, date range, parameter, smoothing window, second-smooth window, LoE threshold, before/after window days.
+- Controls: aircraft type, engine multi-select, date range, parameter, Smooth window, second-smooth window, LoE threshold, before/after window days.
 - Action: `AnalysisState.run_analysis()` runs `WashCalculator.process_all` over selected engines.
 - Visuals: one `rx.plotly` per engine, summary table, ATA-code violin plot.
 - Port `_build_chart` from `dashboard/app.py:343-450` into `components/plot.py` as a pure function.

@@ -58,7 +58,7 @@ def compute_lifetime_trend(
     Args:
         flights: Flight records for one engine (records for other engines are ignored).
         parameter: Parameter to fit.
-        smooth_window: Optional smoothing window. None = fit raw values.
+        smooth_window: Optional Smooth window. None = fit raw values.
 
     Returns:
         A LifetimeTrend. When fewer than 2 matching observations exist, slope and

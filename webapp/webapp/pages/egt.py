@@ -45,7 +45,7 @@ _MODEL_PARAM_FIELDS = [
     ("lookback_cycles", "Lookback cycles", 1),
     ("egthdm_threshold", "EGTHDM threshold", 0.05),
     ("degt_threshold", "DEGT threshold", 0.05),
-    ("smoothing_window", "Smoothing window", 1),
+    ("smoothing_window", "Smooth window", 1),
     ("decline_window_days", "Decline window (days)", 0.5),
     ("decline_min_span_days", "Decline min span (days)", 0.5),
     ("decline_min_points", "Decline min points", 1),
@@ -162,7 +162,7 @@ def _param_selector() -> rx.Component:
             rx.vstack(
                 rx.hstack(
                     rx.input(
-                        placeholder="Search parameters…",
+                        placeholder="Parameter name",
                         value=EgtState.param_search,
                         on_change=EgtState.set_param_search,
                         size="1",
@@ -338,7 +338,7 @@ def _control_panel() -> rx.Component:
         rx.vstack(
             rx.text("Engine", size="2", weight="medium"),
             rx.input(
-                placeholder="Search engine / aircraft…",
+                placeholder="Engine or aircraft",
                 value=EgtState.engine_search,
                 on_change=EgtState.set_engine_search,
                 size="1",

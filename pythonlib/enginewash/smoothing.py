@@ -35,7 +35,7 @@ def smooth_series(
 
     Args:
         values: Pre-smoothed or raw values
-        window: Smoothing window size
+        window: Smooth window size
         fallback: Raw values to fill where smoothed values are NaN
 
     Returns:

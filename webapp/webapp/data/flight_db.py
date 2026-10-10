@@ -143,7 +143,7 @@ def read_trends(
     if lo is not None and hi is not None and lo >= hi:
         raise ValueError("Start date must be on or before end date.")
     if not 1 <= window <= 1000:
-        raise ValueError("Smoothing window must be between 1 and 1000.")
+        raise ValueError("Smooth window must be between 1 and 1000.")
     catalog = {
         e["id"]: e
         for e in (

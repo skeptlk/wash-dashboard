@@ -143,7 +143,7 @@ def _sortable_header(label: str, column: str) -> rx.Component:
 def _ranked_table() -> rx.Component:
     return rx.vstack(
         rx.input(
-            placeholder="Search engine / aircraft…",
+            placeholder="Engine or aircraft",
             value=DegradationState.engine_search,
             on_change=DegradationState.set_engine_search,
             size="2",

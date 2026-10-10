@@ -76,7 +76,7 @@ def _control_panel() -> rx.Component:
             on_select_all=AnalysisState.select_all_engines,
             on_clear=AnalysisState.clear_engines,
             max_height="160px",
-            search_placeholder="Search engine / aircraft…",
+            search_placeholder="Engine or aircraft",
         ),
         # Smoothing & detection
         rx.divider(),
