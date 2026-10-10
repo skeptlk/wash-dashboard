@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta
 import json
 import logging
@@ -481,7 +481,7 @@ def single_instance(path):
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def main():
+def main(argv=None, *, connection_context=nullcontext):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--window-days", type=int, default=7)
     parser.add_argument("--overlap-hours", type=int, default=24)
@@ -511,7 +511,7 @@ def main():
         action="store_true",
         help="Read and validate source windows without changing DuckDB",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if (
         args.window_days < 1
         or args.overlap_hours < 0
@@ -543,6 +543,7 @@ def main():
 
         with (
             single_instance(args.lock_file),
+            connection_context(),
             psycopg.connect(
                 os.environ.get("SYNC_POSTGRES_DSN", ""),
                 autocommit=True,

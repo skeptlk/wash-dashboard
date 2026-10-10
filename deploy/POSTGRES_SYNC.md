@@ -80,6 +80,28 @@ exit/crash. Configure Task Scheduler to ignore new instances while one is runnin
 Use only one designated ingestion machine; this is not a distributed writer lock.
 Other Parquet-backed dashboard pages continue to use their existing data sources.
 
+## Python-only launcher (no PowerShell script execution)
+
+Run `deploy/run_postgres_sync.py` directly with Python. It sets the package path,
+loads configuration, opens the optional SSH tunnel, and calls the same ingestion
+module. It does not invoke PowerShell or require changing its execution policy.
+The already-configured `deploy/postgres-sync.local.psd1` is reused as a data file:
+the Python reader accepts the example's flat, single-quoted strings and integer
+values, including comments, UTF-8/BOM and UTF-16. It does not evaluate expressions
+or variable interpolation. No additional Python dependencies are needed.
+
+From the existing checkout on Windows:
+
+```powershell
+.\.venv-sync\Scripts\python.exe deploy\run_postgres_sync.py --dry-run --max-windows 1
+```
+
+An alternate config is selected with `--config C:\path\postgres-sync.local.psd1`.
+All ingestion options (`--since`, `--aircraft`, `--window-days`, etc.) are forwarded;
+explicit command-line options override config defaults. The existing OS lock is
+acquired before SSH starts. The former `.ps1` launcher remains available for
+existing installations but is not needed for these instructions.
+
 ## Install and verify
 
 Place this repository at, for example, `C:\engine-wash`. In PowerShell:
@@ -113,16 +135,16 @@ $env:DUCKDB_EXTENSION_DIRECTORY = 'C:\engine-wash-secrets\duckdb-extensions'
 .\.venv-sync\Scripts\python.exe -m webapp.data.quack install
 
 # Read-only preview: validates source SQL, engine joins and representative windows.
-powershell.exe -NoProfile -File deploy\run-postgres-sync.ps1 -DryRun -MaxWindows 3
+.\.venv-sync\Scripts\python.exe deploy\run_postgres_sync.py --dry-run --max-windows 3
 
 # First bounded import; subsequent invocations resume from its committed cursor.
-powershell.exe -NoProfile -File deploy\run-postgres-sync.ps1 -MaxWindows 10
+.\.venv-sync\Scripts\python.exe deploy\run_postgres_sync.py --max-windows 10
 # Full catch-up / normal recurring run:
-powershell.exe -NoProfile -File deploy\run-postgres-sync.ps1
+.\.venv-sync\Scripts\python.exe deploy\run_postgres_sync.py
 ```
 
-Follow the machine's PowerShell execution policy (sign/unblock reviewed scripts as
-appropriate). Logs rotate under `data\sync-logs\sync.log`; SSH errors are separate.
+The commands above launch Python directly; no PowerShell script execution is
+required. Logs rotate under `data\sync-logs\sync.log`; SSH errors are separate.
 Exit 0 means success, unchanged state, or a requested window budget reached. Exit 1
 means failure; previously committed windows remain safe. Driver error SQL and
 credentials are not logged. Validation errors include an actionable explanation;
@@ -138,8 +160,8 @@ For direct Python use, set standard libpq `PGHOST`, `PGDATABASE`, `PGUSER`,
 Create a task under the same account used above:
 
 1. Trigger: daily, repeat every **10 minutes**, duration **indefinitely**.
-2. Action program: `powershell.exe`.
-3. Arguments: `-NoProfile -File "C:\engine-wash\deploy\run-postgres-sync.ps1"`.
+2. Action program: `C:\engine-wash\.venv-sync\Scripts\python.exe`.
+3. Arguments: `"C:\engine-wash\deploy\run_postgres_sync.py"`.
 4. Start in: `C:\engine-wash`.
 5. Run whether the user is logged on or not, using the account with access to the
    secrets, SSH key/agent and network. Test this exact execution mode manually.
