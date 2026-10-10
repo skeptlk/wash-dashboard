@@ -523,5 +523,136 @@ def test_quack_mode_requires_credentials_and_never_creates_file(tmp_path, monkey
     monkeypatch.delenv("QUACK_TOKEN_FILE", raising=False)
     monkeypatch.delenv("QUACK_TOKEN", raising=False)
     with pytest.raises(ValueError, match="QUACK_TOKEN"):
-        flight_db.connect()
+        with flight_db.connect():
+            pass
     assert not (tmp_path / "missing.duckdb").exists()
+
+
+def test_progressive_parameters_are_acknowledged_and_not_retransmitted(
+    database, monkeypatch
+):
+    from webapp.state.constructor import ConstructorState
+
+    monkeypatch.setenv("FLIGHT_DATABASE_PATH", str(database))
+    calls = []
+    original = flight_db.read_trends
+
+    def read(*args, **kwargs):
+        calls.append(args[2])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(flight_db, "read_trends", read)
+
+    async def run():
+        state = ConstructorState(_reflex_internal_init=True)
+        state.selected_engine = "B737:101"
+        _ = [item async for item in state.on_load()]
+        assert state.selected_params == ["EGTHDM@TAKEOFF", "DEGT@CRUISE"]
+        assert calls == [["EGTHDM@TAKEOFF"]]
+        assert state.has_chart and state.is_computing
+        assert state.loaded_params == 1 and state.chart_offset == 0
+        generation = state.chart_generation
+        first = state.chart_figure.to_json()
+        await state.load_next_parameter(generation - 1, 1)
+        await state.load_next_parameter(generation, 0)
+        assert state.chart_figure.to_json() == first
+        await state.load_next_parameter(generation, 1)
+        assert calls == [["EGTHDM@TAKEOFF"], ["DEGT@CRUISE"]]
+        assert state.loaded_params == 2 and not state.is_computing
+        assert state.chart_offset == 4 and len(state.chart_figure.data) == 4
+        assert state.chart_figure.data[0].xaxis == "x2"
+        expected = build_chart(
+            "B737",
+            "101",
+            state.selected_params,
+            state.start_date,
+            state.end_date,
+            path=database,
+        )
+        import json
+
+        expected.update_xaxes(range=None, autorange=True)
+        assert json.loads(state._chart_figure.to_json()) == json.loads(
+            expected.to_json()
+        )
+        await state.load_next_parameter(generation, 1)
+        assert len(calls) == 2
+        state.on_plot_relayout({"xaxis.range": ["2025-01-02", "2025-01-03"]})
+        assert len(state.chart_figure.data) == 0 and state.chart_offset == 8
+        assert list(state.chart_figure.layout.xaxis.range) == [
+            "2025-01-02",
+            "2025-01-03",
+        ]
+        _ = [item async for item in state.select_engine("B737:102")]
+        await state.load_next_parameter(generation, 2)
+        assert state.loaded_params == 1
+
+    asyncio.run(run())
+
+
+def test_progressive_empty_first_row_and_later_failure(database, monkeypatch):
+    from webapp.state.constructor import ConstructorState
+
+    monkeypatch.setenv("FLIGHT_DATABASE_PATH", str(database))
+    # Give the first selected parameter no readings; later rows must still load.
+    with duckdb.connect(str(database)) as db:
+        db.execute("UPDATE reports SET egthdm=NULL WHERE aircraft_type='B737'")
+
+    async def run():
+        state = ConstructorState(_reflex_internal_init=True)
+        state.selected_engine = "B737:101"
+        _ = [item async for item in state.on_load()]
+        assert state.has_chart and state.is_computing
+        assert len(state.chart_figure.data[0].x) == 0
+        await state.load_next_parameter(state.chart_generation, 1)
+        assert state.has_chart and not state.is_computing
+        _ = [item async for item in state.set_start_date("2026-01-01")]
+        assert state.error  # invalid date order stops loading
+        state.start_date = "2025-01-01"
+        _ = [item async for item in state._refresh()]
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("transport lost")
+
+        monkeypatch.setattr(flight_db, "read_trends", fail)
+        await state.load_next_parameter(state.chart_generation, 1)
+        assert not state.is_computing and "remaining parameters" in state.error
+
+    asyncio.run(run())
+
+
+def test_constructor_reuses_catalog_for_same_family(database, monkeypatch):
+    from webapp.state.constructor import ConstructorState
+
+    monkeypatch.setenv("FLIGHT_DATABASE_PATH", str(database))
+    original = flight_db.parameter_catalog
+    calls = []
+
+    def catalog(family, *args):
+        calls.append(family)
+        return original(family, *args)
+
+    monkeypatch.setattr(flight_db, "parameter_catalog", catalog)
+
+    async def run():
+        state = ConstructorState(_reflex_internal_init=True)
+        state.selected_engine = "B737:101"
+        _ = [item async for item in state.on_load()]
+        await state.load_next_parameter(state.chart_generation, 1)
+        _ = [item async for item in state.select_engine("B737:102")]
+        await state.load_next_parameter(state.chart_generation, 1)
+        assert calls == ["B737"]
+        _ = [item async for item in state.select_engine("E170:101")]
+        assert calls == ["B737", "E170"]
+
+    asyncio.run(run())
+
+
+def test_sql_string_values_cannot_change_query(database):
+    attack = "B737' OR TRUE --"
+    assert flight_db.parameter_catalog(attack, database) == []
+    assert flight_db.date_bounds("B737", "101' OR TRUE --", database) == (None, None)
+    series, events = flight_db.read_trends(
+        "B737", "101' OR TRUE --", ["EGTHDM@TAKEOFF"], "", "", path=database
+    )
+    assert series[0][1].empty and events == []

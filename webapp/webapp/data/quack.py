@@ -3,12 +3,70 @@
 from __future__ import annotations
 
 import os
+import atexit
+import hashlib
 from contextlib import contextmanager
 from pathlib import Path
+from threading import BoundedSemaphore, Lock
 
 import duckdb
 
 DEFAULT_URI = "quack:127.0.0.1:9494"
+
+
+class ReadConnectionPool:
+    """Bounded, exclusive leases; a connection is never shared by two threads."""
+
+    def __init__(self, size=4):
+        self._slots = BoundedSemaphore(size)
+        self._lock = Lock()
+        self._idle = []
+        self._generation = 0
+
+    @contextmanager
+    def connection(self):
+        # Include credentials and extension configuration without retaining the token.
+        key = (
+            os.getpid(),
+            os.environ.get("FLIGHT_QUACK_URL", DEFAULT_URI),
+            hashlib.sha256(token().encode()).digest(),
+            tuple(extension_config().items()),
+        )
+        with self._slots:
+            db = None
+            with self._lock:
+                generation = self._generation
+                while self._idle:
+                    old_key, candidate = self._idle.pop()
+                    if old_key == key:
+                        db = candidate
+                        break
+                    candidate.close()
+            if db is None:
+                db = connect_remote()
+            try:
+                yield db
+            except BaseException:
+                # Do not reuse interrupted queries or broken transports.
+                db.close()
+                raise
+            else:
+                with self._lock:
+                    if generation == self._generation:
+                        self._idle.append((key, db))
+                    else:
+                        db.close()
+
+    def close(self):
+        with self._lock:
+            self._generation += 1
+            for _, db in self._idle:
+                db.close()
+            self._idle.clear()
+
+
+read_pool = ReadConnectionPool()
+atexit.register(read_pool.close)
 
 
 def extension_config() -> dict[str, str]:

@@ -61,7 +61,10 @@ or include it in client-side Reflex state. `FLIGHT_DATABASE_PATH` belongs to the
 server; Constructor does not open that file in Quack mode.
 
 No inbound database firewall port is needed: the server binds only to
-`127.0.0.1:9494`. The dashboard uses short-lived read-only attachments. A service
+`127.0.0.1:9494`. The dashboard reuses up to four read-only connections per process,
+leased exclusively to each reader. Failed connections are discarded. Constructor
+executes complete queries through `flights.query()` so filtering and smoothing
+stay on the server, including queries against views. A service
 failure is surfaced in the UI, with no silent fallback to the local file.
 SIGTERM/SIGINT stops the listener, checkpoints the database and closes it.
 

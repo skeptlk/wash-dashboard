@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 import duckdb
 import pandas as pd
 
 from .aircraft_registry import AIRCRAFT_REG
-from .quack import connect_remote
+from .quack import read_pool, sql_literal
 
 DEFAULT_DATABASE = Path(__file__).resolve().parents[3] / "data" / "flights.duckdb"
 META_COLUMNS = {
@@ -35,12 +36,25 @@ def quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+class _RemoteReader:
+    def __init__(self, db):
+        self.db = db
+
+    def execute(self, sql):
+        # Querying a remote view directly can pull the entire table to the
+        # client before filtering. Execute the complete SQL on the server.
+        return self.db.execute("FROM flights.query(?)", [sql])
+
+
+@contextmanager
 def connect(path: Path | None = None):
     # An explicit path is reserved for offline tools/tests. Remote failures must
     # never silently open another database or compete with the service's lock.
     mode = os.environ.get("FLIGHT_DATABASE_MODE", "quack")
     if path is None and mode == "quack":
-        return connect_remote()
+        with read_pool.connection() as db:
+            yield _RemoteReader(db)
+        return
     if path is None and mode != "file":
         raise ValueError("FLIGHT_DATABASE_MODE must be quack or file.")
     path = path or database_path()
@@ -55,10 +69,9 @@ def connect(path: Path | None = None):
             CREATE TEMP VIEW constructor_reports AS
             SELECT rowid AS _report_rowid, * FROM reports
         """)
-        return db
-    except Exception:
+        yield db
+    finally:
         db.close()
-        raise
 
 
 def engine_options(path: Path | None = None) -> list[dict]:
@@ -82,12 +95,11 @@ def engine_options(path: Path | None = None) -> list[dict]:
 def parameter_catalog(aircraft_type: str, path: Path | None = None) -> list[dict]:
     with connect(path) as db:
         rows = db.execute(
-            """
+            f"""
             SELECT flight_phase, column_name FROM report_parameters
-            WHERE aircraft_type = ?
+            WHERE aircraft_type = {sql_literal(aircraft_type)}
             ORDER BY CASE flight_phase WHEN 'TAKEOFF' THEN 0 ELSE 1 END, column_name
         """,
-            [aircraft_type],
         ).fetchall()
     return [
         {
@@ -103,11 +115,10 @@ def parameter_catalog(aircraft_type: str, path: Path | None = None) -> list[dict
 def date_bounds(aircraft_type: str, engine_id: str, path: Path | None = None):
     with connect(path) as db:
         return db.execute(
-            """
+            f"""
             SELECT min(flight_datetime), max(flight_datetime) FROM reports
-            WHERE aircraft_type = ? AND engine_id = ?
+            WHERE aircraft_type = {sql_literal(aircraft_type)} AND engine_id = {sql_literal(engine_id)}
         """,
-            [aircraft_type, engine_id],
         ).fetchone()
 
 
@@ -119,6 +130,8 @@ def read_trends(
     end: str,
     window: int = 26,
     path: Path | None = None,
+    *,
+    catalog: list[dict] | None = None,
 ):
     """Filter in SQL, keeping trailing history before clipping the date window.
 
@@ -131,10 +144,25 @@ def read_trends(
         raise ValueError("Start date must be on or before end date.")
     if not 1 <= window <= 1000:
         raise ValueError("Smoothing window must be between 1 and 1000.")
-    catalog = {e["id"]: e for e in parameter_catalog(aircraft_type, path)}
+    catalog = {
+        e["id"]: e
+        for e in (
+            parameter_catalog(aircraft_type, path) if catalog is None else catalog
+        )
+    }
     if any(pid not in catalog for pid in parameter_ids):
         raise ValueError("Unknown chart parameter.")
     series = []
+    upper = (
+        f"AND flight_datetime < TIMESTAMP_NS {sql_literal(hi.isoformat())}"
+        if hi is not None
+        else ""
+    )
+    lower = (
+        f"WHERE flight_datetime >= TIMESTAMP_NS {sql_literal(lo.isoformat())}"
+        if lo is not None
+        else ""
+    )
     with connect(path) as db:
         for pid in parameter_ids:
             entry = catalog[pid]
@@ -148,20 +176,20 @@ def read_trends(
                             AND CURRENT ROW
                         ) AS smoothed
                     FROM constructor_reports
-                    WHERE aircraft_type = ? AND engine_id = ? AND flight_phase = ?
+                    WHERE aircraft_type = {sql_literal(aircraft_type)}
+                      AND engine_id = {sql_literal(engine_id)}
+                      AND flight_phase = {sql_literal(entry["phase"])}
                       AND {column} IS NOT NULL AND flight_datetime IS NOT NULL
-                      AND (? IS NULL OR flight_datetime < ?)
-                ) WHERE (? IS NULL OR flight_datetime >= ?) ORDER BY flight_datetime
+                      {upper}
+                ) {lower} ORDER BY flight_datetime
             """,
-                [aircraft_type, engine_id, entry["phase"], hi, hi, lo, lo],
             ).fetchdf()
             series.append((entry, frame))
         history = db.execute(
-            """
+            f"""
             SELECT install_datetime, removal_datetime, reason_for_removal
-            FROM onwing WHERE engine_id = ?
+            FROM onwing WHERE engine_id = {sql_literal(engine_id)}
         """,
-            [engine_id],
         ).fetchall()
     events = [
         (dt, kind, reason)

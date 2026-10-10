@@ -4,7 +4,7 @@ import reflex as rx
 from plotly.io import templates
 
 from ..components.shell import page_shell
-from ..components.trend_plotly import TrendPlotly
+from ..components.constructor_plotly import ConstructorPlotly
 from ..state.constructor import ConstructorState as State
 
 
@@ -174,7 +174,7 @@ def constructor_page():
                     ),
                 ),
                 rx.cond(
-                    State.is_computing,
+                    State.is_computing & (State.loaded_params == 0),
                     rx.center(
                         rx.hstack(
                             rx.spinner(size="3"),
@@ -189,10 +189,40 @@ def constructor_page():
                     ),
                 ),
                 rx.cond(
+                    State.is_computing & (State.loaded_params > 0),
+                    rx.hstack(
+                        rx.spinner(size="1"),
+                        rx.text(
+                            "Loading parameters: ",
+                            State.loaded_params,
+                            " / ",
+                            State.selected_params.length(),
+                            size="1",
+                        ),
+                        align="center",
+                        role="status",
+                        position="absolute",
+                        top="8px",
+                        right="16px",
+                        z_index="1",
+                        pointer_events="none",
+                    ),
+                ),
+                rx.cond(
                     State.has_chart,
                     rx.box(
-                        TrendPlotly.create(
+                        ConstructorPlotly.create(
                             data=State.chart_figure,
+                            generation=State.chart_generation,
+                            offset=State.chart_offset,
+                            on_initialized=State.load_next_parameter(
+                                State.chart_generation,
+                                State.loaded_params,
+                            ),
+                            on_update=State.load_next_parameter(
+                                State.chart_generation,
+                                State.loaded_params,
+                            ),
                             on_relayout=State.on_plot_relayout,
                             template=rx.color_mode_cond(
                                 light=templates["plotly_white"],

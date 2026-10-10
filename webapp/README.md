@@ -80,6 +80,12 @@ chart uses the same readings and trailing-average presentation as EGT, without
 labels or predictions. Smoothing includes history before the displayed range.
 The other dashboard pages continue using their existing loaders.
 
+Parameters load progressively in selection order, within one chart with shared
+time axes. After the browser renders a parameter, it requests the next one.
+Each update carries only the new parameter's traces and the chart layout;
+previous observations stay in the browser. A loading counter remains visible
+until all rows arrive. Stale acknowledgements from an earlier selection are ignored.
+
 Constructor keeps the engine/type (`engine`), date range (`start`, `end`), ordered
 parameter selection (`params`, comma-separated), smoothing window (`smoothing`),
 and horizontal chart viewport (`x_start`, `x_end`) in the URL. Reloading or sharing
@@ -133,7 +139,9 @@ imports leave the previous file intact. Stop the dashboard and Quack before repl
 it. Database files are ignored by Git and must be migrated or copied separately
 when deploying. Connection failures are surfaced on Constructor.
 
-Constructor opens short-lived read-only Quack attachments; it has no file or
+Constructor leases exclusive read-only connections from a bounded pool (up to
+four per dashboard process). Complete SQL queries execute on the Quack server,
+so views do not transfer unfiltered report tables to the dashboard. It has no file or
 Parquet fallback if the service is unavailable. External trusted clients can
 insert data through the same service. The deployment guide includes an SSH
 tunnel, client examples and the `transaction(db)` helper required for remote

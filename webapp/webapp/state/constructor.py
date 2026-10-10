@@ -11,7 +11,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import reflex as rx
 
-from ..components.constructor_fig import build_chart
+from ..components.constructor_fig import add_series, empty_chart
 from ..data import flight_db
 from ..data.egt_params import DEFAULT_PARAMS
 
@@ -32,6 +32,12 @@ class ConstructorState(rx.State):
     timeline_end: str = ""
     chart_rows: int = 0
     chart_figure: go.Figure = go.Figure()
+    chart_generation: int = 0
+    chart_offset: int = 0
+    loaded_params: int = 0
+    _chart_figure: go.Figure = go.Figure()
+    _loading_param: bool = False
+    _catalog_family: str = ""
     has_chart: bool = False
     is_computing: bool = False
     error: str = ""
@@ -61,6 +67,8 @@ class ConstructorState(rx.State):
 
     async def _refresh(self):
         self.error = ""
+        self.loaded_params = 0
+        self.is_computing = False
         if not self.selected_engine or not self.selected_params:
             self.has_chart = False
             yield self._sync_url()
@@ -68,24 +76,18 @@ class ConstructorState(rx.State):
         self.is_computing = True
         # Keep the previous figure and its dimensions beneath the loading overlay.
         yield self._sync_url()
+        self.chart_generation += 1
         try:
             family, eid = self.selected_engine.split(":", 1)
             for value in (self.start_date, self.end_date):
                 if value:
                     date.fromisoformat(value)
-            figure = await asyncio.to_thread(
-                build_chart,
-                family,
-                eid,
-                list(self.selected_params),
-                self.start_date,
-                self.end_date,
-                int(self.smoothing_window),
+            catalog = {entry["id"]: entry for entry in self.catalog}
+            self._chart_figure = await asyncio.to_thread(
+                empty_chart, family, eid, [catalog[pid] for pid in self.selected_params]
             )
-            self.chart_figure = figure if figure is not None else go.Figure()
-            self.has_chart = figure is not None
             self.chart_rows = len(self.selected_params)
-            self._apply_timeline()
+            await self._load_parameter()
         except (ValueError, FileNotFoundError) as exc:
             self.error = str(exc)
             self.has_chart = False
@@ -93,15 +95,78 @@ class ConstructorState(rx.State):
             logger.exception("Constructor chart failed")
             self.error = "Could not read the flight database. Check the server logs."
             self.has_chart = False
-        finally:
+        if self.error:
             self.is_computing = False
 
-    def _select(self, key):
+    async def _load_parameter(self):
+        """Send one row; the browser requests the next after Plotly renders it."""
+        family, eid = self.selected_engine.split(":", 1)
+        pid = self.selected_params[self.loaded_params]
+        series, events = await asyncio.to_thread(
+            flight_db.read_trends,
+            family,
+            eid,
+            [pid],
+            self.start_date,
+            self.end_date,
+            int(self.smoothing_window),
+            catalog=list(self.catalog),
+        )
+        offset = len(self._chart_figure.data)
+        entry, frame = series[0]
+        await asyncio.to_thread(
+            add_series,
+            self._chart_figure,
+            entry,
+            frame,
+            events,
+            self.loaded_params + 1,
+            int(self.smoothing_window),
+        )
+        self.loaded_params += 1
+        self.is_computing = self.loaded_params < len(self.selected_params)
+        # Empty rows must still mount Plotly so its acknowledgement advances loading.
+        self.has_chart = True
+        self._apply_timeline()
+        self.chart_offset = offset
+        self.chart_figure = go.Figure(
+            data=self._chart_figure.data[offset:],
+            layout=self._chart_figure.layout,
+        )
+        if not self.is_computing:
+            self.has_chart = any(
+                len(trace.x)
+                for trace in self._chart_figure.data
+                if trace.name == "Actual"
+            )
+
+    @rx.event
+    async def load_next_parameter(self, generation: int, completed: int):
+        if (
+            generation != self.chart_generation
+            or completed != self.loaded_params
+            or not self.is_computing
+            or self._loading_param
+        ):
+            return
+        self._loading_param = True
+        try:
+            await self._load_parameter()
+        except Exception:
+            logger.exception("Constructor parameter load failed")
+            self.error = "Could not load the remaining parameters. Change the selection to retry."
+            self.is_computing = False
+        finally:
+            self._loading_param = False
+
+    async def _select(self, key):
         if not any(e["key"] == key for e in self.engines):
             raise ValueError("Unknown engine")
         family, eid = key.split(":", 1)
         self.selected_engine = key
-        self.catalog = flight_db.parameter_catalog(family)
+        if family != self._catalog_family:
+            self.catalog = await asyncio.to_thread(flight_db.parameter_catalog, family)
+            self._catalog_family = family
         available = {e["id"] for e in self.catalog}
         selected = [p for p in self.selected_params if p in available]
         self.selected_params = (
@@ -110,7 +175,7 @@ class ConstructorState(rx.State):
             or [e["id"] for e in self.catalog[:1]]
         )
         if not self.start_date and not self.end_date:
-            lo, hi = flight_db.date_bounds(family, eid)
+            lo, hi = await asyncio.to_thread(flight_db.date_bounds, family, eid)
             if lo is not None:
                 self.start_date = (
                     max(pd.Timestamp(lo), pd.Timestamp(hi) - pd.DateOffset(years=2))
@@ -129,7 +194,7 @@ class ConstructorState(rx.State):
                 key = params.get("engine", self.selected_engine)
                 if not any(e["key"] == key for e in self.engines):
                     key = self.engines[0]["key"]
-                self._select(key)
+                await self._select(key)
             else:
                 self.selected_engine = ""
             self._restore_url(params)
@@ -150,7 +215,7 @@ class ConstructorState(rx.State):
         if not any(e["key"] == key for e in self.engines):
             return
         try:
-            self._select(key)
+            await self._select(key)
         except Exception:
             logger.exception("Constructor engine selection failed")
             self.error = "Could not read the flight database. Reload the page to retry."
@@ -270,7 +335,7 @@ class ConstructorState(rx.State):
         )
 
     def _apply_timeline(self):
-        self.chart_figure.update_xaxes(
+        self._chart_figure.update_xaxes(
             range=[self.timeline_start, self.timeline_end]
             if self.timeline_start
             else None,
@@ -296,4 +361,7 @@ class ConstructorState(rx.State):
         if previous == (self.timeline_start, self.timeline_end):
             return
         self._apply_timeline()
+        # A zoom update sends layout only, never the already loaded observations.
+        self.chart_offset = len(self._chart_figure.data)
+        self.chart_figure = go.Figure(layout=self._chart_figure.layout)
         return self._sync_url()
