@@ -21,6 +21,9 @@ build/
 venv/
 env/
 .env
+*.duckdb
+*.duckdb.wal
+*.duckdb.tmp/
 
 # Pytest
 .pytest_cache/

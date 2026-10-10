@@ -1,0 +1,21 @@
+[Unit]
+Description=ECM flight database (DuckDB Quack)
+After=network.target
+
+[Service]
+Type=simple
+User=b000gdan
+WorkingDirectory=/home/b000gdan/ecm
+Environment=PYTHONPATH=/home/b000gdan/ecm/webapp
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/ecm/quack.env
+ExecStart=/home/b000gdan/ecm/.venv/bin/python -m webapp.data.quack_server
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

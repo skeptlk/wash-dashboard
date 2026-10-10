@@ -10,12 +10,14 @@ from .pages.degradation import degradation_page
 from .pages.login import login_page
 from .pages.schedule import schedule_page
 from .pages.egt import egt_page
+from .pages.constructor import constructor_page
 from .state.analysis import AnalysisState
 from .state.auth import AuthState
 from .state.base import GlobalState
 from .state.degradation import DegradationState
 from .state.egt import EgtState
 from .state.schedule import ScheduleState
+from .state.constructor import ConstructorState
 
 app = rx.App(
     head_components=[
@@ -23,6 +25,12 @@ app = rx.App(
     ],
 )
 app.add_middleware(AuthMiddleware(), index=0)
+app.add_page(
+    constructor_page,
+    route="/constructor",
+    title="ECM — Constructor",
+    on_load=[AuthState.require_auth, ConstructorState.on_load],
+)
 app.add_page(
     login_page,
     route="/login",

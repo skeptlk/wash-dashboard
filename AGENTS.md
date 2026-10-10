@@ -72,6 +72,7 @@ dvc pull
 | `/analysis` | Wash Analysis | Before/after wash effects, per-engine charts, and effectiveness summaries |
 | `/schedule` | Wash Schedule | Wash/maintenance timeline with aircraft and ATA filters |
 | `/egt` | EGT Indication | B737 parameter traces, installation/removal and maintenance markers, failure predictions, and dataset labeling |
+| `/constructor` | Constructor | DuckDB-backed parameter trends for B737, A320 and E170 with engine installation/removal markers |
 | `/login` | Sign In | Shared dashboard authentication |
 
 These pages are implemented; Wash Analysis and Wash Schedule are not stubs.
@@ -104,6 +105,18 @@ Paths below are relative to `webapp/`:
 
 Runtime dependencies are pinned in `requirements.txt`; retain both
 `reflex.lock/package.json` and `reflex.lock/bun.lock` when updating Reflex.
+
+Constructor reads through the separate `wash-quack.service`, which owns
+`data/flights.duckdb` (override with `FLIGHT_DATABASE_PATH`). Its default backend
+is Quack; `FLIGHT_DATABASE_MODE=file` is an explicit offline-only option.
+From the repository root, build it with
+`PYTHONPATH=webapp python -m webapp.data.migrate_flights`; see `webapp/README.md`
+for offline sources and explicit replacement, and `deploy/README.md` for systemd
+installation, tokens, SSH access and remote transactions. `webapp/data/flight_db.py`
+owns read-only queries; `quack.py` owns connections and the server-side transaction
+helper; `quack_server.py` owns the listener lifecycle. Stop Quack before replacing
+or directly opening its database file. The migration preserves every source report, including null
+engine IDs, in one wide `reports` table. Other pages still use the Parquet loader.
 
 ### Adding an aircraft type
 

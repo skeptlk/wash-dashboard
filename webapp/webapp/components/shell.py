@@ -12,6 +12,7 @@ _NAV_ITEMS = [
     ("Wash Analysis", "/analysis", "droplets"),
     ("Wash Schedule", "/schedule", "calendar"),
     ("EGT Indication", "/egt", "thermometer_sun"),
+    ("Constructor", "/constructor", "chart-no-axes-combined"),
 ]
 
 

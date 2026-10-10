@@ -63,6 +63,7 @@ def test_tampered_token_is_rejected(state):
     "webapp___state___degradation____degradation_state.recompute",
     "webapp___state___analysis____analysis_state.on_load",
     "webapp___state___schedule____schedule_state.on_load",
+    "webapp___state___constructor____constructor_state.on_load",
     "webapp___state___egt____egt_state.setvar",
 ])
 def test_direct_dashboard_events_require_valid_login(state, name):
