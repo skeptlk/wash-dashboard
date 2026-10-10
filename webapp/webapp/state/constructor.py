@@ -4,6 +4,7 @@ import asyncio
 from datetime import date, datetime
 import json
 import logging
+import math
 import re
 from urllib.parse import parse_qsl
 
@@ -47,18 +48,20 @@ class ConstructorState(rx.State):
         q = self.engine_search.strip().lower()
         return [e for e in self.engines if q in e["label"].lower()]
 
-    @rx.var
+    @rx.var(cache=False)
     def takeoff_params(self) -> list[dict[str, str]]:
         return self._filtered_params("TAKEOFF")
 
-    @rx.var
+    @rx.var(cache=False)
     def cruise_params(self) -> list[dict[str, str]]:
         return self._filtered_params("CRUISE")
 
     def _filtered_params(self, phase):
         q = self.param_search.strip().lower()
         return [
-            e for e in self.catalog if e["phase"] == phase and q in e["name"].lower()
+            dict(e)
+            for e in self.catalog
+            if e["phase"] == phase and q in e["name"].lower()
         ]
 
     @rx.var
@@ -84,8 +87,13 @@ class ConstructorState(rx.State):
                     date.fromisoformat(value)
             catalog = {entry["id"]: entry for entry in self.catalog}
             self._chart_figure = await asyncio.to_thread(
-                empty_chart, family, eid, [catalog[pid] for pid in self.selected_params]
+                empty_chart,
+                family,
+                eid,
+                [catalog[pid] for pid in self.selected_params],
+                next(e for e in self.engines if e["key"] == self.selected_engine),
             )
+            self._chart_figure.update_layout(uirevision=self.chart_generation)
             self.chart_rows = len(self.selected_params)
             await self._load_parameter()
         except (ValueError, FileNotFoundError) as exc:
@@ -135,9 +143,7 @@ class ConstructorState(rx.State):
         )
         if not self.is_computing:
             self.has_chart = any(
-                len(trace.x)
-                for trace in self._chart_figure.data
-                if trace.name == "Actual"
+                len(trace.x) for trace in self._chart_figure.data if trace.name == "Raw"
             )
 
     @rx.event
@@ -164,7 +170,7 @@ class ConstructorState(rx.State):
             raise ValueError("Unknown engine")
         family, eid = key.split(":", 1)
         self.selected_engine = key
-        if family != self._catalog_family:
+        if family != self._catalog_family or not self.catalog:
             self.catalog = await asyncio.to_thread(flight_db.parameter_catalog, family)
             self._catalog_family = family
         available = {e["id"] for e in self.catalog}
@@ -345,6 +351,36 @@ class ConstructorState(rx.State):
     @rx.event
     def on_plot_relayout(self, data: dict):
         previous = (self.timeline_start, self.timeline_end)
+        y_changed = False
+        # Plotly reports only the axes touched by the gesture. Preserve each
+        # primary Y axis independently, including Y-only zoom and reset.
+        for axis_name in self._chart_figure.layout:
+            if not re.fullmatch(r"yaxis\d*", axis_name):
+                continue
+            axis = self._chart_figure.layout[axis_name]
+            if axis.fixedrange:
+                continue
+            if data.get(f"{axis_name}.autorange") is True:
+                y_changed |= axis.range is not None or axis.autorange is not True
+                axis.update(range=None, autorange=True)
+                continue
+            bounds = data.get(
+                f"{axis_name}.range",
+                [
+                    data.get(f"{axis_name}.range[0]"),
+                    data.get(f"{axis_name}.range[1]"),
+                ],
+            )
+            if (
+                isinstance(bounds, list)
+                and len(bounds) == 2
+                and all(
+                    isinstance(v, (int, float)) and math.isfinite(v) for v in bounds
+                )
+                and bounds[0] != bounds[1]
+            ):
+                y_changed |= tuple(bounds) != axis.range or axis.autorange is not False
+                axis.update(range=bounds, autorange=False)
         for key, value in data.items():
             if re.fullmatch(r"xaxis\d*\.autorange", key) and value is True:
                 self.timeline_start = self.timeline_end = ""
@@ -358,7 +394,7 @@ class ConstructorState(rx.State):
                 if len(bounds) == 2 and self._valid_timeline(*bounds):
                     self.timeline_start, self.timeline_end = bounds
                     break
-        if previous == (self.timeline_start, self.timeline_end):
+        if previous == (self.timeline_start, self.timeline_end) and not y_changed:
             return
         self._apply_timeline()
         # A zoom update sends layout only, never the already loaded observations.

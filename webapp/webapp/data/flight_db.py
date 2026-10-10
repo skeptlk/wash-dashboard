@@ -77,7 +77,8 @@ def connect(path: Path | None = None):
 def engine_options(path: Path | None = None) -> list[dict]:
     with connect(path) as db:
         rows = db.execute("""
-            SELECT aircraft_type, engine_id, arg_max(aircraft_id, flight_datetime)
+            SELECT aircraft_type, engine_id, arg_max(aircraft_id, flight_datetime),
+                arg_max(engine_position, flight_datetime)
             FROM reports WHERE engine_id IS NOT NULL AND flight_datetime IS NOT NULL
             GROUP BY aircraft_type, engine_id ORDER BY aircraft_type, engine_id
         """).fetchall()
@@ -87,8 +88,10 @@ def engine_options(path: Path | None = None) -> list[dict]:
             "aircraft_type": family,
             "key": f"{family}:{eid}",
             "label": f"{eid}: {family} {AIRCRAFT_REG.get(aid, aid) or ''}",
+            "registration": AIRCRAFT_REG.get(aid, aid) or "?",
+            "position": str(pos) if pos is not None else "?",
         }
-        for family, eid, aid in rows
+        for family, eid, aid, pos in rows
     ]
 
 
@@ -96,9 +99,10 @@ def parameter_catalog(aircraft_type: str, path: Path | None = None) -> list[dict
     with connect(path) as db:
         rows = db.execute(
             f"""
-            SELECT flight_phase, column_name FROM report_parameters
+            SELECT DISTINCT upper(flight_phase), column_name FROM report_parameters
             WHERE aircraft_type = {sql_literal(aircraft_type)}
-            ORDER BY CASE flight_phase WHEN 'TAKEOFF' THEN 0 ELSE 1 END, column_name
+              AND NOT starts_with(lower(column_name), 'pip_')
+            ORDER BY 1 DESC, column_name
         """,
         ).fetchall()
     return [

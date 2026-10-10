@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from ..data.egt_params import line_with_gaps, plotly_timestamps
-from ..data.flight_db import read_trends
+from ..data.flight_db import engine_options, read_trends
 
 
 def build_chart(aircraft_type, engine_id, params, start, end, window=26, path=None):
@@ -16,37 +16,47 @@ def build_chart(aircraft_type, engine_id, params, start, end, window=26, path=No
     )
     if not any(not frame.empty for _, frame in series):
         return None
-    fig = empty_chart(aircraft_type, engine_id, [entry for entry, _ in series])
+    engine = next(
+        (e for e in engine_options(path) if e["key"] == f"{aircraft_type}:{engine_id}"),
+        {},
+    )
+    fig = empty_chart(aircraft_type, engine_id, [entry for entry, _ in series], engine)
     for row, (entry, frame) in enumerate(series, 1):
         add_series(fig, entry, frame, events, row, window)
     return fig
 
 
-def empty_chart(aircraft_type, engine_id, entries):
+def empty_chart(aircraft_type, engine_id, entries, engine=None):
     """Reserve all rows before the first parameter arrives."""
     rows = len(entries)
+    engine = engine or {}
     fig = make_subplots(
         rows=rows,
         cols=1,
         shared_xaxes=True,
         specs=[[{"secondary_y": True}] for _ in entries],
         vertical_spacing=min(0.085, 0.7 / max(1, rows - 1)),
-        subplot_titles=[f"{e['name']} ({e['phase'].title()})" for e in entries],
+        subplot_titles=[
+            f"{e['name']} ({e['phase'].title()}), ESN = {engine_id}, "
+            f"Pos = {engine.get('position', '?')}, "
+            f"{engine.get('registration', '?')}, {aircraft_type}"
+            for e in entries
+        ],
     )
     fig.update_annotations(x=0, xanchor="left", font_size=12, yshift=3)
     fig.update_layout(
         template="plotly_white",
-        title={"text": f"{engine_id} · {aircraft_type}", "font": {"size": 15}},
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        margin={"l": 66, "r": 16, "t": 70, "b": 38},
+        margin={"l": 66, "r": 16, "t": 48, "b": 38},
         font={"family": "Inter, system-ui, sans-serif", "size": 11},
         legend={
             "orientation": "h",
             "x": 1,
             "xanchor": "right",
             "y": 1,
-            "yanchor": "bottom",
+            "yref": "container",
+            "yanchor": "top",
         },
         autosize=True,
         dragmode="zoom",
@@ -72,10 +82,10 @@ def add_series(fig, entry, frame, events, row, window):
             x=plotly_timestamps(xs),
             y=frame.value.to_numpy(dtype=float),
             mode="markers",
-            name="Actual",
-            legendgroup="actual",
+            name="Raw",
+            legendgroup="raw",
             showlegend=row == 1,
-            marker={"size": 3, "color": "#3b82f6", "opacity": 0.4},
+            marker={"size": 4, "color": "#3b82f6", "opacity": 0.4},
             hovertemplate=hover,
         ),
         row=row,

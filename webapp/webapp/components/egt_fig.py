@@ -131,7 +131,7 @@ class EgtChartRequest:
                     x=egt_params.plotly_timestamps(xs),
                     y=np.asarray(ys, dtype=np.float64),
                     mode="markers",
-                    name="Actual",
+                    name="Raw",
                     legendgroup="readings",
                     showlegend=i == 1,
                     meta="reading",

@@ -173,12 +173,17 @@ def test_chart_has_trends_and_replacements_without_failure_features(database):
         "B737", "101", ["EGTHDM@TAKEOFF"], "2025-01-01", "2025-01-03", path=database
     )
     assert [trace.name for trace in fig.data] == [
-        "Actual",
+        "Raw",
         "Smoothed (window=26)",
         "Install",
         "Removal",
     ]
     assert len(fig.data[0].x) == 3
+    assert fig.data[0].marker.size == 4
+    assert fig.layout.title.text is None
+    assert fig.layout.annotations[0].text == (
+        "EGTHDM (Takeoff), ESN = 101, Pos = 1, 00123, B737"
+    )
     assert len(fig.layout.shapes) == 2
     assert fig.layout.yaxis2.visible is False
     assert (
@@ -572,6 +577,7 @@ def test_progressive_parameters_are_acknowledged_and_not_retransmitted(
         import json
 
         expected.update_xaxes(range=None, autorange=True)
+        expected.update_layout(uirevision=generation)
         assert json.loads(state._chart_figure.to_json()) == json.loads(
             expected.to_json()
         )
@@ -656,3 +662,111 @@ def test_sql_string_values_cannot_change_query(database):
         "B737", "101' OR TRUE --", ["EGTHDM@TAKEOFF"], "", "", path=database
     )
     assert series[0][1].empty and events == []
+
+
+def test_parameter_selector_loads_filters_and_switches_families(database, monkeypatch):
+    from webapp.state.constructor import ConstructorState
+
+    monkeypatch.setenv("FLIGHT_DATABASE_PATH", str(database))
+    with duckdb.connect(str(database)) as db:
+        db.execute("""
+            INSERT INTO report_parameters VALUES
+                ('B737', 'TAKEOFF', 'pip_hidden'),
+                ('B737', 'CRUISE', 'PIP_HIDDEN'),
+                ('B737', 'TAKEOFF', 'visible_pip_value')
+        """)
+
+    async def run():
+        state = ConstructorState(_reflex_internal_init=True)
+        # Hydration initially renders empty selectors before on_load runs.
+        assert state.takeoff_params == state.cruise_params == []
+        state.selected_engine = "B737:101"
+        _ = [item async for item in state.on_load()]
+        delta = state.get_delta()[state.get_full_name()]
+        assert {p["name"] for p in delta["takeoff_params_rx_state_"]} == {
+            "EGTHDM",
+            "VISIBLE_PIP_VALUE",
+        }
+        assert {p["name"] for p in delta["cruise_params_rx_state_"]} == {"DEGT"}
+        assert all(not p["name"].lower().startswith("pip_") for p in state.catalog)
+        state.set_param_search("egt")
+        assert [p["name"] for p in state.takeoff_params] == ["EGTHDM"]
+        assert [p["name"] for p in state.cruise_params] == ["DEGT"]
+        state.set_param_search("")
+        _ = [item async for item in state.select_engine("E170:101")]
+        assert {p["name"] for p in state.takeoff_params} == {"EGTHDM", "EMB_ONLY"}
+        assert state.cruise_params == []
+
+    asyncio.run(run())
+
+
+def test_constructor_zoom_keeps_dates_data_and_independent_y_ranges(
+    database, monkeypatch
+):
+    from webapp.state.constructor import ConstructorState
+
+    monkeypatch.setenv("FLIGHT_DATABASE_PATH", str(database))
+    calls = []
+    original = flight_db.read_trends
+
+    def read(*args, **kwargs):
+        calls.append(args[2])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(flight_db, "read_trends", read)
+
+    async def run():
+        state = ConstructorState(_reflex_internal_init=True)
+        state.selected_engine = "B737:101"
+        _ = [item async for item in state.on_load()]
+        dates = state.start_date, state.end_date
+        generation = state.chart_generation
+        state.on_plot_relayout(
+            {
+                "xaxis.range[0]": "2025-01-02",
+                "xaxis.range[1]": "2025-01-03",
+                "yaxis.range[0]": 15,
+                "yaxis.range[1]": 25,
+            }
+        )
+        assert calls == [["EGTHDM@TAKEOFF"]]
+        assert (state.start_date, state.end_date) == dates
+        assert state.chart_generation == generation and state.loaded_params == 1
+        assert len(state.chart_figure.data) == 0
+        assert state._chart_figure.layout.yaxis.range == (15, 25)
+        assert state._chart_figure.layout.yaxis3.range is None
+        assert state._chart_figure.layout.yaxis2.range == (0, 1)
+        for axis in (state.chart_figure.layout.xaxis, state.chart_figure.layout.xaxis2):
+            assert axis.range == ("2025-01-02", "2025-01-03")
+        # A parameter already being loaded retains the viewport on arrival.
+        await state.load_next_parameter(generation, 1)
+        assert state.chart_figure.layout.yaxis.range == (15, 25)
+        assert len(calls) == 2
+        state.on_plot_relayout({"yaxis3.range": [12, 18]})
+        assert state.chart_figure.layout.yaxis3.range == (12, 18)
+        assert state.chart_figure.layout.yaxis.range == (15, 25)
+        assert len(calls) == 2 and (state.start_date, state.end_date) == dates
+        # Repeated events from Plotly.react do not trigger an update loop.
+        assert state.on_plot_relayout({"yaxis3.range": [12, 18]}) is None
+        assert state.on_plot_relayout({"yaxis3.range": [None, 18]}) is None
+        state.on_plot_relayout({"yaxis3.autorange": True})
+        assert state.chart_figure.layout.yaxis3.range is None
+        assert state.chart_figure.layout.yaxis.range == (15, 25)
+        state.on_plot_relayout({"xaxis.autorange": True, "yaxis.autorange": True})
+        assert state.chart_figure.layout.yaxis.range is None
+        assert state.chart_figure.layout.xaxis.range is None
+        assert len(calls) == 2
+
+    asyncio.run(run())
+
+
+def test_subplot_titles_use_registration_from_engine_list(database, monkeypatch):
+    monkeypatch.setitem(flight_db.AIRCRAFT_REG, "00123", "RA-73424")
+    engine = next(
+        e for e in flight_db.engine_options(database) if e["key"] == "A320:101"
+    )
+    fig = build_chart("A320", "101", ["EGTHDM@TAKEOFF"], "", "", path=database)
+    assert engine["label"].endswith("RA-73424")
+    assert fig.layout.annotations[0].text == (
+        "EGTHDM (Takeoff), ESN = 101, Pos = 1, RA-73424, A320"
+    )

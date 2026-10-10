@@ -43,7 +43,6 @@ def _parameter_group(title, options):
 
 def _controls():
     return rx.vstack(
-        rx.heading("Constructor", size="4"),
         rx.vstack(
             rx.text("Date range", size="2", weight="medium"),
             rx.hstack(
