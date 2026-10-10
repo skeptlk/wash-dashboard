@@ -10,6 +10,7 @@ import logging
 import math
 import os
 from pathlib import Path
+import re
 
 from .quack import connect_remote, sql_literal, transaction
 
@@ -481,6 +482,79 @@ def single_instance(path):
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def postgres_error_hint(exc):
+    """Classify driver details without echoing DSNs, SQL or credential values."""
+    message = str(exc).lower()
+    reasons = (
+        (
+            ("no password supplied", "password is required"),
+            "No password supplied. Check PGPASSFILE exists and its host:port:database:user fields match the connection.",
+        ),
+        (
+            ("password authentication failed",),
+            "Password authentication failed. Check PGUSER and the matching password in PGPASSFILE.",
+        ),
+        (
+            ("no pg_hba.conf entry",),
+            "Server access rules rejected this connection. Ask the PostgreSQL administrator to check client address, user, database and SSL policy.",
+        ),
+        (
+            ("does not support ssl",),
+            "The endpoint does not support SSL, but PGSSLMODE requires it. Confirm the correct endpoint and SSL policy with the administrator.",
+        ),
+        (
+            (
+                "certificate verify failed",
+                "root certificate file",
+                "server certificate",
+            ),
+            "TLS certificate validation failed. Check PGSSLROOTCERT, PGHOST and the server certificate.",
+        ),
+        (
+            (
+                "could not translate host name",
+                "could not resolve",
+                "getaddrinfo",
+                "name or service not known",
+            ),
+            "Host name resolution failed. Check PGHOST and access to corporate DNS/VPN.",
+        ),
+        (
+            ("connection refused", "actively refused"),
+            "TCP connection refused. Check PGHOST/PGPORT and whether PostgreSQL listens on that endpoint.",
+        ),
+        (
+            (
+                "timeout expired",
+                "timed out",
+                "network is unreachable",
+                "no route to host",
+            ),
+            "PostgreSQL is unreachable or timed out. Check network/VPN, firewall and PGHOST/PGPORT.",
+        ),
+        (
+            ("server closed the connection", "connection reset", "ssl syscall error"),
+            "Connection was interrupted. Check the network and PostgreSQL server logs.",
+        ),
+    )
+    hints = [hint for patterns, hint in reasons if any(p in message for p in patterns)]
+    if "database" in message and "does not exist" in message:
+        hints.append("Database does not exist. Check PGDATABASE.")
+    if "role" in message and "does not exist" in message:
+        hints.append("Role does not exist. Check PGUSER.")
+    code = getattr(exc, "sqlstate", None)
+    suffix = (
+        f" SQLSTATE={code}."
+        if isinstance(code, str) and re.fullmatch(r"[A-Z0-9]{5}", code)
+        else ""
+    )
+    return (
+        " ".join(hints)
+        if hints
+        else "Unclassified PostgreSQL error; check server logs for application engine-wash-sync at this time."
+    ) + suffix
+
+
 def main(argv=None, *, connection_context=nullcontext):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--window-days", type=int, default=7)
@@ -538,41 +612,59 @@ def main(argv=None, *, connection_context=nullcontext):
         format="%(asctime)s %(levelname)s %(message)s",
         handlers=handlers,
     )
+    stage = "startup / SSH tunnel"
+    psycopg = None
     try:
         import psycopg
 
-        with (
-            single_instance(args.lock_file),
-            connection_context(),
-            psycopg.connect(
+        with single_instance(args.lock_file), connection_context():
+            stage = "PostgreSQL connection"
+            LOG.info("Connecting to PostgreSQL")
+            with psycopg.connect(
                 os.environ.get("SYNC_POSTGRES_DSN", ""),
                 autocommit=True,
                 connect_timeout=30,
                 application_name="engine-wash-sync",
                 options="-c default_transaction_read_only=on -c statement_timeout=300000 -c timezone=UTC",
-            ) as source_db,
-            connect_remote(read_only=args.dry_run) as target_db,
-        ):
-            count = sync(
-                PostgresSource(source_db, args.max_window_rows),
-                QuackSink(target_db),
-                window_days=args.window_days,
-                overlap_hours=args.overlap_hours,
-                since=args.since,
-                aircraft_ids=args.aircraft,
-                max_windows=args.max_windows,
-                dry_run=args.dry_run,
-            )
-            LOG.info("Sync complete: %s reports processed (including overlaps)", count)
+            ) as source_db:
+                LOG.info("PostgreSQL connected")
+                stage = "Quack connection"
+                LOG.info("Connecting to Quack")
+                with connect_remote(read_only=args.dry_run) as target_db:
+                    LOG.info("Quack connected")
+                    stage = "data synchronization"
+                    count = sync(
+                        PostgresSource(source_db, args.max_window_rows),
+                        QuackSink(target_db),
+                        window_days=args.window_days,
+                        overlap_hours=args.overlap_hours,
+                        since=args.since,
+                        aircraft_ids=args.aircraft,
+                        max_windows=args.max_windows,
+                        dry_run=args.dry_run,
+                    )
+                    LOG.info(
+                        "Sync complete: %s reports processed (including overlaps)",
+                        count,
+                    )
     except SourceDataError as exc:
         LOG.error("Sync stopped: %s; checkpoint retained", exc)
         raise SystemExit(1) from None
     except Exception as exc:
         # Driver exceptions may contain connection strings/passwords or SQL data.
-        LOG.error(
-            "Sync failed (%s); checkpoint retained. Check connections, source schema, onwing overlaps and window size.",
-            type(exc).__name__,
-        )
+        if isinstance(exc, getattr(psycopg, "Error", ())):
+            LOG.error(
+                "PostgreSQL failed during %s (%s): %s Checkpoint retained.",
+                stage,
+                type(exc).__name__,
+                postgres_error_hint(exc),
+            )
+        else:
+            LOG.error(
+                "Sync failed during %s (%s); checkpoint retained. Check connections, source schema, onwing overlaps and window size.",
+                stage,
+                type(exc).__name__,
+            )
         raise SystemExit(1) from None
 
 

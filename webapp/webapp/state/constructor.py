@@ -12,7 +12,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import reflex as rx
 
-from ..components.constructor_fig import add_series, empty_chart
+from ..components.constructor_fig import add_series, copy_series, empty_chart
 from ..data import flight_db
 from ..data.egt_params import DEFAULT_PARAMS
 
@@ -34,9 +34,14 @@ class ConstructorState(rx.State):
     chart_rows: int = 0
     chart_figure: go.Figure = go.Figure()
     chart_generation: int = 0
+    chart_data_generation: int = 0
     chart_offset: int = 0
     loaded_params: int = 0
     _chart_figure: go.Figure = go.Figure()
+    _series_cache: dict[str, go.Figure] = {}
+    _figure_params: list[str] = []
+    _sent_params: list[str] = []
+    _data_key: str = ""
     _loading_param: bool = False
     _catalog_family: str = ""
     has_chart: bool = False
@@ -70,10 +75,30 @@ class ConstructorState(rx.State):
 
     async def _refresh(self):
         self.error = ""
-        self.loaded_params = 0
+        data_key = json.dumps(
+            [self.selected_engine, self.start_date, self.end_date, self.smoothing_window]
+        )
+        if data_key != self._data_key:
+            self._data_key = data_key
+            self.chart_data_generation += 1
+            self._series_cache = {}
+            self._sent_params = []
+            self.loaded_params = 0
+        else:
+            for row, pid in enumerate(self._figure_params):
+                if pid in self._series_cache:
+                    axis = self._chart_figure.layout[f"yaxis{2 * row + 1 if row else ''}"]
+                    self._series_cache[pid].update_yaxes(
+                        range=axis.range, autorange=axis.autorange, secondary_y=False
+                    )
+        if not self.has_chart:
+            self._sent_params = []
         self.is_computing = False
         if not self.selected_engine or not self.selected_params:
+            self.chart_generation += 1
             self.has_chart = False
+            self.loaded_params = 0
+            self._sent_params = []
             yield self._sync_url()
             return
         self.is_computing = True
@@ -93,7 +118,9 @@ class ConstructorState(rx.State):
                 [catalog[pid] for pid in self.selected_params],
                 next(e for e in self.engines if e["key"] == self.selected_engine),
             )
-            self._chart_figure.update_layout(uirevision=self.chart_generation)
+            self._chart_figure.update_layout(uirevision=self.chart_data_generation)
+            self._figure_params = list(self.selected_params)
+            self.loaded_params = 0
             self.chart_rows = len(self.selected_params)
             await self._load_parameter()
         except (ValueError, FileNotFoundError) as exc:
@@ -107,40 +134,67 @@ class ConstructorState(rx.State):
             self.is_computing = False
 
     async def _load_parameter(self):
-        """Send one row; the browser requests the next after Plotly renders it."""
+        """Reuse cached rows and load at most one new parameter per browser ack."""
         family, eid = self.selected_engine.split(":", 1)
-        pid = self.selected_params[self.loaded_params]
-        series, events = await asyncio.to_thread(
-            flight_db.read_trends,
-            family,
-            eid,
-            [pid],
-            self.start_date,
-            self.end_date,
-            int(self.smoothing_window),
-            catalog=list(self.catalog),
-        )
         offset = len(self._chart_figure.data)
-        entry, frame = series[0]
-        await asyncio.to_thread(
-            add_series,
-            self._chart_figure,
-            entry,
-            frame,
-            events,
-            self.loaded_params + 1,
-            int(self.smoothing_window),
-        )
-        self.loaded_params += 1
+        while self.loaded_params < len(self.selected_params):
+            pid = self.selected_params[self.loaded_params]
+            cached = pid in self._series_cache
+            if not cached:
+                series, events = await asyncio.to_thread(
+                    flight_db.read_trends,
+                    family,
+                    eid,
+                    [pid],
+                    self.start_date,
+                    self.end_date,
+                    int(self.smoothing_window),
+                    catalog=list(self.catalog),
+                )
+                entry, frame = series[0]
+                source = empty_chart(family, eid, [entry])
+                await asyncio.to_thread(
+                    add_series,
+                    source,
+                    entry,
+                    frame,
+                    events,
+                    1,
+                    int(self.smoothing_window),
+                )
+                for index, trace in enumerate(source.data):
+                    trace.meta = f"{pid}:{index}"
+                self._series_cache[pid] = source
+            row = self.loaded_params + 1
+            copy_series(self._chart_figure, self._series_cache[pid], row)
+            self._chart_figure.update_yaxes(
+                uirevision=f"{self.chart_data_generation}:{pid}",
+                row=row,
+                col=1,
+                secondary_y=False,
+            )
+            self.loaded_params += 1
+            if not cached:
+                break
         self.is_computing = self.loaded_params < len(self.selected_params)
         # Empty rows must still mount Plotly so its acknowledgement advances loading.
         self.has_chart = True
         self._apply_timeline()
         self.chart_offset = offset
-        self.chart_figure = go.Figure(
-            data=self._chart_figure.data[offset:],
-            layout=self._chart_figure.layout,
+        traces = []
+        for trace in self._chart_figure.data[offset:]:
+            payload = trace.to_plotly_json()
+            pid = trace.meta.rsplit(":", 1)[0]
+            if pid in self._sent_params:
+                for field in ("x", "y", "customdata"):
+                    payload.pop(field, None)
+            traces.append(payload)
+        self._sent_params = list(
+            dict.fromkeys(
+                [*self._sent_params, *self.selected_params[: self.loaded_params]]
+            )
         )
+        self.chart_figure = go.Figure(data=traces, layout=self._chart_figure.layout)
         if not self.is_computing:
             self.has_chart = any(
                 len(trace.x) for trace in self._chart_figure.data if trace.name == "Raw"
@@ -233,6 +287,8 @@ class ConstructorState(rx.State):
     @rx.event
     async def toggle_param(self, param_id: str, checked: bool):
         if not any(e["id"] == param_id for e in self.catalog):
+            return
+        if (param_id in self.selected_params) == checked:
             return
         self.selected_params = [p for p in self.selected_params if p != param_id]
         if checked:

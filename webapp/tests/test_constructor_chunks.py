@@ -8,6 +8,12 @@ import pytest
 from webapp.components.constructor_plotly import _CONSTRUCTOR_FIGURE_JS
 
 
+def test_constructor_page_builds_with_state_bindings():
+    from webapp.pages.constructor import constructor_page
+
+    assert constructor_page().render()
+
+
 def test_chunk_assembly():
     node = shutil.which("node")
     if not node:

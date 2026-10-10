@@ -197,3 +197,55 @@ def test_connection_context_runs_inside_lock_and_closes(tmp_path, monkeypatch):
     assert events == ["tunnel open", "sync", "tunnel closed"]
     with client.sync_flights.single_instance(lock):
         pass
+
+
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [
+        ("fe_sendauth: no password supplied", "No password supplied"),
+        ("password authentication failed", "Password authentication failed"),
+        ("server does not support SSL, but SSL was required", "does not support SSL"),
+        ("could not translate host name", "Host name resolution failed"),
+        ("connection refused", "TCP connection refused"),
+        ("connection timeout expired", "unreachable or timed out"),
+        ("no pg_hba.conf entry", "Server access rules"),
+        ('database "secret" does not exist', "Check PGDATABASE"),
+        ('role "secret" does not exist', "Check PGUSER"),
+        ("unrecognized issue", "Unclassified PostgreSQL error"),
+    ],
+)
+def test_postgres_hint_never_echoes_driver_secrets(detail, expected):
+    error = RuntimeError(detail + " postgresql://user:secret@host/db password=secret")
+    hint = client.sync_flights.postgres_error_hint(error)
+    assert expected in hint
+    assert "secret" not in hint
+    assert "postgresql://" not in hint
+
+
+def test_failed_postgres_connection_reports_stage_without_opening_quack(
+    tmp_path, monkeypatch, caplog
+):
+    import sys
+    from types import SimpleNamespace
+
+    class OperationalError(Exception):
+        sqlstate = "28P01"
+
+    def fail(*args, **kwargs):
+        raise OperationalError("password authentication failed; password=secret")
+
+    monkeypatch.setitem(
+        sys.modules, "psycopg", SimpleNamespace(connect=fail, Error=OperationalError)
+    )
+    quack = Mock()
+    monkeypatch.setattr(client.sync_flights, "connect_remote", quack)
+    with pytest.raises(SystemExit) as result:
+        client.sync_flights.main(
+            ["--dry-run", "--lock-file", str(tmp_path / "sync.lock")]
+        )
+    assert result.value.code == 1
+    assert "PostgreSQL connection" in caplog.text
+    assert "Password authentication failed" in caplog.text
+    assert "SQLSTATE=28P01" in caplog.text
+    assert "secret" not in caplog.text
+    quack.assert_not_called()
