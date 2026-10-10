@@ -38,3 +38,9 @@ htmlcov/
 # macOS
 .DS_Store
 **/.DS_Store
+
+# Machine-local PostgreSQL ingestion settings/runtime
+.venv-sync/
+deploy/postgres-sync.local.psd1
+data/postgres-sync.lock
+data/sync-logs/

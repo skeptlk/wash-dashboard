@@ -214,6 +214,7 @@ def constructor_page():
                             data=State.chart_figure,
                             generation=State.chart_generation,
                             offset=State.chart_offset,
+                            data_generation=State.chart_data_generation,
                             on_initialized=State.load_next_parameter(
                                 State.chart_generation,
                                 State.loaded_params,

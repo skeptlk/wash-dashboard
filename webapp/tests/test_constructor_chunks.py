@@ -36,6 +36,28 @@ assert.deepEqual(ref.current.figure.layout.xaxis.range, [1, 2]);
 const changed = constructorFigure(ref, first, 2, 0);
 assert.deepEqual(changed.data.map(t => t.name), ['EGTHDM']);
 assert.deepEqual(first.data, [{name: 'EGTHDM'}]);
+// Parameter changes retain arrays and change only subplot references.
+const cachedRef = {current: null};
+const readings = [10, 20, 30];
+const initial = {data: [{meta: 'A:0', x: [1, 2, 3], y: readings, yaxis: 'y'}]};
+constructorFigure(cachedRef, initial, 1, 0, 1);
+const addition = {data: [
+    {meta: 'A:0', yaxis: 'y'},
+    {meta: 'B:0', x: [4], y: [40], yaxis: 'y3'},
+]};
+const added = constructorFigure(cachedRef, addition, 2, 0, 1);
+assert.equal(added.data[0].y, readings);
+assert.equal(added.data[0].uid, '41-3a-30');
+const removal = {data: [{meta: 'B:0', yaxis: 'y'}]};
+const removed = constructorFigure(cachedRef, removal, 3, 0, 1);
+assert.deepEqual(removed.data[0].y, [40]);
+assert.equal(removed.data[0].yaxis, 'y');
+const restored = constructorFigure(cachedRef, {data: [{meta: 'A:0'}]}, 4, 0, 1);
+assert.equal(restored.data[0].y, readings);
+// Engine/date/smoothing changes invalidate the browser cache.
+const fresh = constructorFigure(cachedRef, {data: [{meta: 'A:0', x: [9], y: [99]}]}, 5, 0, 2);
+assert.deepEqual(fresh.data[0].y, [99]);
+assert.equal(cachedRef.current.cache.has('B:0'), false);
 """,
         ],
         check=True,

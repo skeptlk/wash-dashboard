@@ -125,11 +125,11 @@ Do not distribute it to dashboard users. For direct internet exposure, configure
 a TLS reverse proxy and an authorization policy first; the supplied service
 intentionally stays on localhost. See [Quack security](https://duckdb.org/docs/current/quack/security).
 
-The `no_data_report` incremental connector is a separate step. Before production
-inserts it must define merge keys/checkpoints and prevent repeated batches from
-creating duplicates. New measurement columns also need `report_parameters`
-updates and a service restart to refresh `constructor_reports`; engine replacement
-history lives in `onwing`.
+The `no_data_report` incremental connector is implemented in
+`webapp.data.sync_flights`. See [Windows PostgreSQL ingestion](POSTGRES_SYNC.md)
+for installation, source contracts, a read-only preview, resumable initial catch-up,
+and ten-minute scheduling. It merges reports and checkpoints atomically, refreshes
+`onwing` history, and updates new parameter columns/catalog/view through Quack.
 
 ## Local development and tests
 

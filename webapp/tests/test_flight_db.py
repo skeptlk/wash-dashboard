@@ -349,7 +349,6 @@ def test_constructor_invalid_url_values_and_reset_zoom(database, monkeypatch):
     "handler,args",
     [
         ("select_engine", ("E170:101",)),
-        ("toggle_param", ("EGTHDM@TAKEOFF", True)),
     ],
 )
 def test_constructor_loading_keeps_previous_chart(database, monkeypatch, handler, args):
@@ -577,7 +576,16 @@ def test_progressive_parameters_are_acknowledged_and_not_retransmitted(
         import json
 
         expected.update_xaxes(range=None, autorange=True)
-        expected.update_layout(uirevision=generation)
+        expected.update_layout(uirevision=state.chart_data_generation)
+        for row, pid in enumerate(state.selected_params, 1):
+            expected.update_yaxes(
+                uirevision=f"{state.chart_data_generation}:{pid}",
+                row=row,
+                col=1,
+                secondary_y=False,
+            )
+            for index, trace in enumerate(expected.data[(row - 1) * 4 : row * 4]):
+                trace.meta = f"{pid}:{index}"
         assert json.loads(state._chart_figure.to_json()) == json.loads(
             expected.to_json()
         )
@@ -770,3 +778,77 @@ def test_subplot_titles_use_registration_from_engine_list(database, monkeypatch)
     assert fig.layout.annotations[0].text == (
         "EGTHDM (Takeoff), ESN = 101, Pos = 1, RA-73424, A320"
     )
+
+
+def test_parameter_changes_reuse_series_and_preserve_zoom(database, monkeypatch):
+    from reflex.utils.serializers import serialize
+    from webapp.state.constructor import ConstructorState
+
+    monkeypatch.setenv("FLIGHT_DATABASE_PATH", str(database))
+    calls = []
+    original = flight_db.read_trends
+
+    def read(*args, **kwargs):
+        calls.append((args[1], args[2], args[5]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(flight_db, "read_trends", read)
+
+    async def run():
+        state = ConstructorState(_reflex_internal_init=True)
+        state.selected_engine = "E170:101"
+        _ = [item async for item in state.on_load()]
+        revision = state.chart_data_generation
+        initial = state._chart_figure.to_json()
+        # Checking an already selected parameter is a no-op.
+        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", True)]
+        assert state._chart_figure.to_json() == initial and len(calls) == 1
+        state.on_plot_relayout(
+            {
+                "xaxis.range": ["2025-01-02", "2025-01-03"],
+                "yaxis.range": [15, 25],
+            }
+        )
+        updates = state.toggle_param("EMB_ONLY@TAKEOFF", True)
+        await anext(updates)
+        assert state.has_chart and state.loaded_params == 1  # no full-page overlay
+        _ = [item async for item in updates]
+        assert [call[1] for call in calls] == [["EGTHDM@TAKEOFF"], ["EMB_ONLY@TAKEOFF"]]
+        assert state.chart_data_generation == revision
+        assert state.chart_figure.layout.yaxis.range == (15, 25)
+        assert state.chart_figure.layout.xaxis2.range == ("2025-01-02", "2025-01-03")
+        wire = serialize(state.chart_figure)["data"]
+        assert all("x" not in t and "y" not in t for t in wire[:4])
+        assert wire[0]["meta"] == "EGTHDM@TAKEOFF:0"
+        assert "x" in wire[4] and "y" in wire[4]
+        state.on_plot_relayout({"yaxis3.range": [1.5, 2.5]})
+        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", False)]
+        assert len(calls) == 2 and not state.is_computing
+        assert state.chart_figure.layout.yaxis.range == (1.5, 2.5)
+        assert state.chart_figure.data[0].xaxis == "x"
+        assert state.chart_figure.data[0].showlegend is True
+        assert all(
+            "x" not in t and "y" not in t for t in serialize(state.chart_figure)["data"]
+        )
+        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", True)]
+        assert len(calls) == 2
+        assert state.chart_figure.layout.yaxis.range == (1.5, 2.5)
+        assert state.chart_figure.layout.yaxis3.range == (15, 25)
+        # Reset can reorder existing parameters without querying them again.
+        _ = [item async for item in state.reset_params()]
+        assert len(calls) == 2 and state.chart_figure.layout.yaxis.range == (15, 25)
+        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", False)]
+        assert not state.has_chart
+        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", True)]
+        assert len(calls) == 2 and state.has_chart
+        # An unmounted chart needs arrays again, though no SQL reload is needed.
+        assert "x" in serialize(state.chart_figure)["data"][0]
+        _ = [item async for item in state.set_smoothing_window("3")]
+        assert len(calls) == 3 and state.chart_data_generation != revision
+        _ = [item async for item in state.select_engine("E170:102")]
+        assert calls[-1][0] == "102" and len(calls) == 4
+        assert state._chart_figure.data[0].y.tolist() == [999.0]
+        _ = [item async for item in state.set_start_date("2025-01-03")]
+        assert len(calls) == 5
+
+    asyncio.run(run())

@@ -160,3 +160,23 @@ def add_series(fig, entry, frame, events, row, window):
                 row=row,
                 col=1,
             )
+
+
+def copy_series(fig, source, row):
+    """Place a cached parameter row into a new subplot layout."""
+    for trace in source.data:
+        copied = trace.to_plotly_json()
+        copied["showlegend"] = row == 1
+        fig.add_trace(copied, row=row, col=1, secondary_y=trace.yaxis == "y2")
+    for shape in source.layout.shapes:
+        fig.add_shape(shape.to_plotly_json(), row=row, col=1)
+    for annotation in source.layout.annotations:
+        if annotation.xref != "paper":
+            fig.add_annotation(annotation.to_plotly_json(), row=row, col=1)
+    fig.update_yaxes(
+        range=source.layout.yaxis.range,
+        autorange=source.layout.yaxis.autorange,
+        row=row,
+        col=1,
+        secondary_y=False,
+    )
