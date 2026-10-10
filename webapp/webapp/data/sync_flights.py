@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 
 from .quack import connect_remote, sql_literal, transaction
+from .postgres_diagnostics import connection_error_detail, password_file
 
 LOG = logging.getLogger(__name__)
 PARAMETERS = json.loads(Path(__file__).with_name("sync_parameters.json").read_text())
@@ -581,11 +582,23 @@ def main(argv=None, *, connection_context=nullcontext):
     )
     parser.add_argument("--log-file", type=Path)
     parser.add_argument(
+        "--check-postgres",
+        action="store_true",
+        help="Test only PostgreSQL with SELECT 1; do not connect to Quack or import data",
+    )
+    parser.add_argument(
+        "--ask-password",
+        action="store_true",
+        help="With --check-postgres, prompt for a password instead of using the password file",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Read and validate source windows without changing DuckDB",
     )
     args = parser.parse_args(argv)
+    if args.ask_password and not args.check_postgres:
+        parser.error("--ask-password requires --check-postgres")
     if (
         args.window_days < 1
         or args.overlap_hours < 0
@@ -614,11 +627,28 @@ def main(argv=None, *, connection_context=nullcontext):
     )
     stage = "startup / SSH tunnel"
     psycopg = None
+    supplied_password = None
     try:
         import psycopg
 
-        with single_instance(args.lock_file), connection_context():
+        with (
+            single_instance(args.lock_file),
+            nullcontext() if args.check_postgres else connection_context(),
+        ):
             stage = "PostgreSQL connection"
+            if args.check_postgres:
+                for note in password_file()[0]:
+                    LOG.info("%s", note)
+            options = {}
+            if args.ask_password:
+                from getpass import getpass
+
+                supplied_password = getpass("PostgreSQL password (not saved): ")
+                if not supplied_password:
+                    raise SourceDataError(
+                        "Empty interactive password; connection test cancelled"
+                    )
+                options["password"] = supplied_password
             LOG.info("Connecting to PostgreSQL")
             with psycopg.connect(
                 os.environ.get("SYNC_POSTGRES_DSN", ""),
@@ -626,8 +656,14 @@ def main(argv=None, *, connection_context=nullcontext):
                 connect_timeout=30,
                 application_name="engine-wash-sync",
                 options="-c default_transaction_read_only=on -c statement_timeout=300000 -c timezone=UTC",
+                **options,
             ) as source_db:
                 LOG.info("PostgreSQL connected")
+                if args.check_postgres:
+                    stage = "PostgreSQL SELECT 1"
+                    source_db.execute("SELECT 1").fetchone()
+                    LOG.info("PostgreSQL check OK; no data imported")
+                    return
                 stage = "Quack connection"
                 LOG.info("Connecting to Quack")
                 with connect_remote(read_only=args.dry_run) as target_db:
@@ -659,6 +695,11 @@ def main(argv=None, *, connection_context=nullcontext):
                 type(exc).__name__,
                 postgres_error_hint(exc),
             )
+            if stage == "PostgreSQL connection":
+                LOG.error(
+                    "PostgreSQL detail: %s",
+                    connection_error_detail(exc, supplied_password),
+                )
         else:
             LOG.error(
                 "Sync failed during %s (%s); checkpoint retained. Check connections, source schema, onwing overlaps and window size.",

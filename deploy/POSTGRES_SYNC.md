@@ -147,13 +147,40 @@ The commands above launch Python directly; no PowerShell script execution is
 required. Logs rotate under `data\sync-logs\sync.log`; SSH errors are separate.
 Exit 0 means success, unchanged state, or a requested window budget reached. Exit 1
 means failure; previously committed windows remain safe. Driver error SQL and
-credentials are not logged. Validation errors include an actionable explanation;
-for connection errors check PostgreSQL/SSH/Quack logs and configured paths.
+credentials are not logged. Connection logs identify the PostgreSQL/Quack stage.
+Recognized PostgreSQL errors explain missing/rejected passwords, DNS, TCP, SSL,
+server access rules, or missing database/user, and include SQLSTATE when available.
+Unclassified errors require checking PostgreSQL server logs for application
+`engine-wash-sync` at the failure time. Validation errors include an actionable
+explanation; for connection errors also check SSH/Quack logs and configured paths.
 
 For direct Python use, set standard libpq `PGHOST`, `PGDATABASE`, `PGUSER`,
 `PGPASSFILE`, etc., or `SYNC_POSTGRES_DSN`. Quack uses the existing
 `FLIGHT_QUACK_URL`, `QUACK_TOKEN_FILE` and `DUCKDB_EXTENSION_DIRECTORY` variables.
 `python -m webapp.data.sync_flights --help` lists filtering and replay options.
+
+## Diagnose PostgreSQL independently
+
+If the connection fails before Quack is opened, test PostgreSQL alone:
+
+```powershell
+.\.venv-sync\Scripts\python.exe deploy\run_postgres_sync.py --check-postgres
+# Isolate password-file/environment issues by typing the password without echo:
+.\.venv-sync\Scripts\python.exe deploy\run_postgres_sync.py --check-postgres --ask-password
+```
+
+These modes skip SSH/Quack and ingestion, and run only `SELECT 1`. The prompted
+password is not saved. Diagnostics report whether PGPASSFILE can be read, whether
+it has UTF-16/UTF-8 BOM, and whether its first four fields match the explicit PG*
+settings. This is a file-format check, not verification of the password by the
+server. PGPASSWORD in the environment overrides the password file; interactive
+input overrides both. Colons and backslashes inside pgpass fields must be escaped
+as `\:` and `\\`.
+
+Connection failures also display the original driver message (including localized
+messages), with known passwords and connection URIs masked. Query errors do not
+print raw SQL details. Share the `PostgreSQL detail:` line to diagnose an unknown
+error; no need to send the password or the password-file contents.
 
 ## Windows Task Scheduler (every 10 minutes)
 
