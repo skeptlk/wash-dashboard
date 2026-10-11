@@ -56,15 +56,21 @@ def plotly_timestamps(xs) -> np.ndarray:
     return values
 
 
-def line_with_gaps(xs: list, ys: list) -> tuple[list, list, list[tuple]]:
-    """Break a displayed curve across gaps of at least seven days.
+def line_with_gaps(
+    xs: list, ys: list, gap_days: int = 7, *, include_threshold: bool = True
+) -> tuple[list, list, list[tuple]]:
+    """Break a displayed curve across gaps meeting the configured day threshold.
 
     Only change the plotted line; the smoothed observations and model inputs
-    retain their original values.
+    retain their original values. The default remains at least seven days.
     """
     line_x, line_y, gaps = [], [], []
+    threshold = pd.Timedelta(days=gap_days)
     for i, (x, y) in enumerate(zip(xs, ys)):
-        if i and x - xs[i - 1] >= pd.Timedelta(days=7):
+        if i and (
+            x - xs[i - 1] > threshold
+            or (include_threshold and x - xs[i - 1] == threshold)
+        ):
             gaps.append((xs[i - 1], x))
             line_x.append(None)
             line_y.append(None)

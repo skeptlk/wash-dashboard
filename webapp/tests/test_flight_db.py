@@ -1,6 +1,7 @@
 """Offline migration and Constructor regression coverage."""
 
 import asyncio
+import json
 from pathlib import Path
 
 import duckdb
@@ -153,6 +154,110 @@ def test_sql_filters_inclusive_end_date_and_history_before_start(database):
                 family, eid, ["EGTHDM@TAKEOFF"], "", "", path=database
             )
             assert result[0][1].empty
+
+
+def test_installations_use_full_engine_history_across_phases(database):
+    first = pd.Timestamp("2025-01-01 01:02:03")
+    with duckdb.connect(str(database)) as db:
+        # The first report has no selected reading, but still starts the history.
+        db.execute("""UPDATE reports SET egthdm = NULL
+            WHERE aircraft_type = 'B737' AND engine_id = '101'
+              AND flight_datetime = '2025-01-01 01:02:03'""")
+        db.execute("""INSERT INTO onwing (engine_id, install_datetime, removal_datetime)
+            VALUES ('101', '2024-12-01', '2024-12-02'),
+                   ('101', '2025-01-01 01:02:03', NULL)""")
+    _, events = flight_db.read_trends(
+        "B737", "101", ["EGTHDM@TAKEOFF"], "", "", path=database
+    )
+    installs = [dt for dt, kind, _ in events if kind == "Install"]
+    assert installs == [first, pd.Timestamp("2025-01-02 10:00")]
+    assert (pd.Timestamp("2024-12-02"), "Removal", None) in events
+    _, narrowed = flight_db.read_trends(
+        "B737", "101", ["DEGT@CRUISE"], "2025-01-02", "", path=database
+    )
+    assert (pd.Timestamp("2025-01-02 10:00"), "Install", None) in narrowed
+
+
+def test_early_installation_does_not_extend_chart_timeline(database):
+    fig = build_chart("B737", "102", ["EGTHDM@TAKEOFF"], "", "", path=database)
+    assert len(next(trace for trace in fig.data if trace.name == "Install").x) == 0
+    assert not fig.layout.shapes
+    assert pd.Timestamp(fig.layout.xaxis.tickvals[0]) == pd.Timestamp("2025-01-03")
+
+
+def test_gap_overlays_and_cached_markers_keep_their_subplot():
+    from webapp.components.constructor_fig import add_series, copy_series, empty_chart
+
+    entry = {"name": "EGTHDM", "phase": "TAKEOFF"}
+    frame = pd.DataFrame(
+        {
+            "flight_datetime": pd.to_datetime(
+                ["2025-01-01", "2025-01-02", "2025-02-02"]
+            ),
+            "value": [10.0, 20.0, 30.0],
+            "smoothed": [10.0, 15.0, 20.0],
+        }
+    )
+    events = [
+        (pd.Timestamp("2025-01-10"), "Install", None),
+        (pd.Timestamp("2025-01-20"), "Removal", "Replacement"),
+    ]
+    source = empty_chart("B737", "101", [entry])
+    add_series(source, entry, frame, events, 1, 15)
+    original = source.to_json()
+    copied = empty_chart("B737", "101", [entry, entry, entry])
+    for row in (1, 2, 3):
+        copy_series(copied, source, row)
+    assert source.to_json() == original
+    assert len(copied.layout.shapes) == 9
+    for row, xref, yref in [
+        (1, "x", "y domain"),
+        (2, "x2", "y3 domain"),
+        (3, "x3", "y5 domain"),
+    ]:
+        shapes = copied.layout.shapes[(row - 1) * 3 : row * 3]
+        assert [shape.type for shape in shapes] == ["rect", "line", "line"]
+        assert all(shape.xref == xref and shape.yref == yref for shape in shapes)
+        assert (shapes[0].x0, shapes[0].x1) == (
+            pd.Timestamp("2025-01-02"),
+            pd.Timestamp("2025-02-02"),
+        )
+        annotation = next(a for a in copied.layout.annotations if a.xref == xref)
+        assert annotation.text == "No data" and annotation.yref == yref
+        assert pd.Timestamp(annotation.x) == pd.Timestamp("2025-01-17 12:00")
+        assert annotation.y == 0.5 and annotation.textangle == -90
+    direct = empty_chart("B737", "101", [entry, entry, entry])
+    for row in (1, 2, 3):
+        add_series(direct, entry, frame, events, row, 15)
+    assert json.loads(copied.to_json()) == json.loads(direct.to_json())
+
+
+@pytest.mark.parametrize(
+    "gap, expected",
+    [
+        (pd.Timedelta(days=7), False),
+        (pd.Timedelta(days=30), False),
+        (pd.Timedelta(days=30, seconds=1), True),
+    ],
+)
+def test_constructor_no_data_requires_more_than_thirty_days(gap, expected):
+    import numpy as np
+    from webapp.components.constructor_fig import add_series, empty_chart
+
+    entry = {"name": "EGTHDM", "phase": "TAKEOFF"}
+    first = pd.Timestamp("2025-01-01")
+    frame = pd.DataFrame(
+        {
+            "flight_datetime": [first, first + gap],
+            "value": [10.0, 20.0],
+            "smoothed": [10.0, 15.0],
+        }
+    )
+    fig = empty_chart("B737", "101", [entry])
+    add_series(fig, entry, frame, [], 1, 15)
+    assert bool(fig.layout.shapes) == expected
+    assert any(a.text == "No data" for a in fig.layout.annotations) == expected
+    assert bool(np.isnan(fig.data[1].x).any()) == expected
 
 
 def test_invalid_parameters_dates_and_missing_database(database, tmp_path):

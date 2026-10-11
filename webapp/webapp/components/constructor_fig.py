@@ -88,8 +88,7 @@ def update_time_ticks(fig, start="", end=""):
     ]
     if not bounds:
         return
-    # Historical installation markers can extend autorange before the readings.
-    # Label that part of the timeline too, while ending at the last reading.
+    # Include any visible event before the readings, ending at the last reading.
     lo = pd.to_datetime(
         min(np.nanmin(trace.x) for trace in fig.data if len(trace.x)), unit="ms"
     )
@@ -131,7 +130,9 @@ def add_series(fig, entry, frame, events, row, window):
         row=row,
         col=1,
     )
-    line_x, line_y, gaps = line_with_gaps(xs, frame.smoothed.tolist())
+    line_x, line_y, gaps = line_with_gaps(
+        xs, frame.smoothed.tolist(), gap_days=30, include_threshold=False
+    )
     fig.add_trace(
         go.Scatter(
             x=plotly_timestamps(line_x),
@@ -147,19 +148,38 @@ def add_series(fig, entry, frame, events, row, window):
         row=row,
         col=1,
     )
+    axes = fig.get_subplot(row, 1)
+    xref = axes.xaxis.plotly_name.replace("axis", "")
+    yref = axes.yaxis.plotly_name.replace("axis", "") + " domain"
+    shapes, annotations = [], []
     for lo, hi in gaps:
-        fig.add_vrect(
-            x0=lo,
-            x1=hi,
-            fillcolor="rgba(128,128,128,0.05)",
-            line_width=0,
-            layer="below",
-            row=row,
-            col=1,
-            annotation_text="No data",
-            annotation_position="inside",
-            annotation_font={"size": 9, "color": "#888"},
-            annotation_textangle=-90,
+        shapes.append(
+            dict(
+                type="rect",
+                x0=lo,
+                x1=hi,
+                xref=xref,
+                y0=0,
+                y1=1,
+                yref=yref,
+                fillcolor="rgba(128,128,128,0.05)",
+                line={"width": 0},
+                layer="below",
+            )
+        )
+        annotations.append(
+            dict(
+                text="No data",
+                x=(lo + (hi - lo) / 2).isoformat(),
+                xref=xref,
+                y=0.5,
+                yref=yref,
+                xanchor="center",
+                yanchor="middle",
+                showarrow=False,
+                font={"size": 9, "color": "#888"},
+                textangle=-90,
+            )
         )
     for kind, color, symbol, y in [
         ("Install", "#2ca02c", "triangle-up", 0.96),
@@ -187,19 +207,23 @@ def add_series(fig, entry, frame, events, row, window):
             secondary_y=True,
         )
         for dt, _ in points:
-            fig.add_shape(
-                type="line",
-                x0=dt,
-                x1=dt,
-                y0=0,
-                y1=1,
-                yref="y domain",
-                line={"color": color, "width": 1, "dash": "dot"},
-                opacity=0.4,
-                layer="below",
-                row=row,
-                col=1,
+            shapes.append(
+                dict(
+                    type="line",
+                    x0=dt,
+                    x1=dt,
+                    y0=0,
+                    y1=1,
+                    xref=xref,
+                    yref=yref,
+                    line={"color": color, "width": 1, "dash": "dot"},
+                    opacity=0.4,
+                    layer="below",
+                )
             )
+    # Assign once: add_vrect/add_shape revalidate the growing layout each time.
+    fig.layout.shapes = (*fig.layout.shapes, *shapes)
+    fig.layout.annotations = (*fig.layout.annotations, *annotations)
 
 
 def copy_series(fig, source, row):
@@ -208,11 +232,21 @@ def copy_series(fig, source, row):
         copied = trace.to_plotly_json()
         copied["showlegend"] = row == 1
         fig.add_trace(copied, row=row, col=1, secondary_y=trace.yaxis == "y2")
-    for shape in source.layout.shapes:
-        fig.add_shape(shape.to_plotly_json(), row=row, col=1)
+    axes = fig.get_subplot(row, 1)
+    xref = axes.xaxis.plotly_name.replace("axis", "")
+    yref = axes.yaxis.plotly_name.replace("axis", "") + " domain"
+    fig.layout.shapes = (
+        *fig.layout.shapes,
+        *(
+            dict(shape.to_plotly_json(), xref=xref, yref=yref)
+            for shape in source.layout.shapes
+        ),
+    )
+    annotations = []
     for annotation in source.layout.annotations:
         if annotation.xref != "paper":
-            fig.add_annotation(annotation.to_plotly_json(), row=row, col=1)
+            annotations.append(dict(annotation.to_plotly_json(), xref=xref, yref=yref))
+    fig.layout.annotations = (*fig.layout.annotations, *annotations)
     fig.update_yaxes(
         range=source.layout.yaxis.range,
         autorange=source.layout.yaxis.autorange,

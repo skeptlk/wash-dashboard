@@ -149,6 +149,8 @@ def read_trends(
 
     The end date includes the entire selected day. Null readings do not count
     towards the rolling window, matching the EGT page's trailing mean.
+    Installations before the engine's full report history are hidden, independent
+    of the selected parameter and date window.
     """
     lo = pd.Timestamp(start) if start else None
     hi = pd.Timestamp(end) + pd.Timedelta(days=1) if end else None
@@ -199,7 +201,12 @@ def read_trends(
             series.append((entry, frame))
         history = db.execute(
             f"""
-            SELECT install_datetime, removal_datetime, reason_for_removal
+            SELECT CASE WHEN install_datetime >= (
+                SELECT min(flight_datetime) FROM reports
+                WHERE aircraft_type = {sql_literal(aircraft_type)}
+                  AND engine_id = {sql_literal(engine_id)}
+            ) THEN install_datetime END AS install_datetime,
+                removal_datetime, reason_for_removal
             FROM onwing WHERE engine_id = {sql_literal(engine_id)}
         """,
         ).fetchall()
