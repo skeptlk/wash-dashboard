@@ -5,6 +5,7 @@ from __future__ import annotations
 import reflex as rx
 
 from .auth_middleware import AuthMiddleware
+from .components.system_theme import SystemTheme
 from .pages.analysis import analysis_page
 from .pages.degradation import degradation_page
 from .pages.login import login_page
@@ -20,6 +21,7 @@ from .state.schedule import ScheduleState
 from .state.constructor import ConstructorState
 
 app = rx.App(
+    extra_app_wraps={(19, "SystemTheme"): lambda _: SystemTheme.create()},
     head_components=[
         rx.el.link(rel="icon", href="/plane.svg", type="image/svg+xml"),
     ],

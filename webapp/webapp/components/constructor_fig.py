@@ -230,7 +230,7 @@ def copy_series(fig, source, row):
     """Place a cached parameter row into a new subplot layout."""
     for trace in source.data:
         copied = trace.to_plotly_json()
-        copied["showlegend"] = row == 1
+        copied["showlegend"] = row == 1 or trace.legendgroup == "egt_prediction"
         fig.add_trace(copied, row=row, col=1, secondary_y=trace.yaxis == "y2")
     axes = fig.get_subplot(row, 1)
     xref = axes.xaxis.plotly_name.replace("axis", "")
@@ -257,15 +257,14 @@ def copy_series(fig, source, row):
 
 
 def add_predictions(fig, entry, predictions):
-    """Show EGT values on EGTHDM, and time markers on other parameter rows."""
-    if not predictions:
+    """Show predictions only on the takeoff EGTHDM parameter row."""
+    if entry["id"] != EGTHDM_TAKEOFF_ID or not predictions:
         return
     xs, values = zip(*predictions)
-    egthdm = entry["id"] == EGTHDM_TAKEOFF_ID
     fig.add_trace(
         go.Scatter(
             x=plotly_timestamps(xs),
-            y=np.asarray(values, dtype=float) if egthdm else [0.70] * len(xs),
+            y=np.asarray(values, dtype=float),
             customdata=np.asarray(values, dtype=float),
             mode="markers",
             name="EGT Indication",
@@ -275,5 +274,5 @@ def add_predictions(fig, entry, predictions):
         ),
         row=1,
         col=1,
-        secondary_y=not egthdm,
+        secondary_y=False,
     )

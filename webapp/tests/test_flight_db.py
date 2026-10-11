@@ -1117,7 +1117,10 @@ def test_constructor_prediction_toggle_and_cache(database, monkeypatch):
         assert calls[-1][2] == "2025-01-02"
         _ = [item async for item in state.toggle_param("DEGT@CRUISE", True)]
         _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", False)]
-        prediction = next(t for t in state._chart_figure.data if t.name == "EGT Indication")
-        assert prediction.yaxis == "y2"  # Other units use the event axis.
+        assert not any(t.name == "EGT Indication" for t in state._chart_figure.data)
+        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", True)]
+        predictions = [t for t in state._chart_figure.data if t.name == "EGT Indication"]
+        assert len(predictions) == 1
+        assert predictions[0].yaxis == "y3" and predictions[0].showlegend
 
     asyncio.run(run())
