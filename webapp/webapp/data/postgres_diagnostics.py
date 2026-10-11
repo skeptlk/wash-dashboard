@@ -1,9 +1,13 @@
-"""Connection-only diagnostics; never print password-file contents or DSNs."""
+"""Password-file loading and diagnostics; never print credentials or DSNs."""
 
 import os
 from pathlib import Path
 import re
 from urllib.parse import quote, quote_plus
+
+
+class PasswordFileError(ValueError):
+    """Safe configuration diagnostic containing no password-file values."""
 
 
 def password_file():
@@ -21,10 +25,10 @@ def password_file():
     encoding = "utf-8-sig"
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         encoding = "utf-16"
-        notes.append("PGPASSFILE is UTF-16; save it as UTF-8 without BOM for libpq.")
+        notes.append("PGPASSFILE is UTF-16; the Python reader decodes it explicitly.")
     elif raw.startswith(b"\xef\xbb\xbf"):
         notes.append(
-            "PGPASSFILE starts with a UTF-8 BOM, which can prevent the first entry matching; save without BOM."
+            "PGPASSFILE starts with a UTF-8 BOM; the Python reader removes it."
         )
     try:
         content = raw.decode(encoding)
@@ -47,7 +51,7 @@ def password_file():
             else:
                 current += char
         fields.append(current)
-        if len(fields) == 5:
+        if len(fields) == 5 and not escaped:
             entries.append(fields)
     keys = ("PGHOST", "PGPORT", "PGDATABASE", "PGUSER")
     if all(os.environ.get(k) for k in keys) and not os.environ.get("SYNC_POSTGRES_DSN"):
@@ -67,9 +71,43 @@ def password_file():
         )
     if os.environ.get("PGPASSWORD"):
         notes.append(
-            "PGPASSWORD is set in the environment and takes precedence over the password file."
+            "PGPASSWORD is set in the environment; explicit Python password-file loading overrides it."
         )
     return notes, entries
+
+
+def configured_password():
+    """Load the first matching password for the launcher's explicit PG* config.
+
+    Keep the native libpq credential resolution for direct DSN-based clients and
+    clients without an explicitly configured password file. The Windows launcher
+    uses PG* settings and does not use a DSN.
+    """
+    if not os.environ.get("PGPASSFILE") or os.environ.get("SYNC_POSTGRES_DSN"):
+        return None
+    keys = ("PGHOST", "PGPORT", "PGDATABASE", "PGUSER")
+    if not all(os.environ.get(key) for key in keys):
+        raise PasswordFileError(
+            "Explicit PGPASSFILE loading requires PGHOST, PGPORT, PGDATABASE and PGUSER."
+        )
+    notes, entries = password_file()
+    if not entries:
+        raise PasswordFileError("No usable PGPASSFILE entries. " + " ".join(notes))
+    target = [os.environ[key] for key in keys]
+    for entry in entries:
+        if all(
+            value == "*" or value == expected
+            for value, expected in zip(entry[:4], target)
+        ):
+            if not entry[4]:
+                raise PasswordFileError(
+                    "The first matching PGPASSFILE entry has an empty password."
+                )
+            return entry[4]
+    raise PasswordFileError(
+        "No matching PGPASSFILE entry for PGHOST/PGPORT/PGDATABASE/PGUSER. "
+        "Use the actual connection port (including a pooler port, e.g. 6432)."
+    )
 
 
 def connection_error_detail(exc, supplied_password=None):

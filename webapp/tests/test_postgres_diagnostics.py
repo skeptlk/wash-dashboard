@@ -58,7 +58,7 @@ def test_missing_and_nonmatching_password_file(passfile):
 def test_environment_password_precedence(passfile, monkeypatch):
     passfile.write_text("db:5432:ecm:reader:file-secret")
     monkeypatch.setenv("PGPASSWORD", "environment-secret")
-    assert "takes precedence" in " ".join(diag.password_file()[0])
+    assert "overrides it" in " ".join(diag.password_file()[0])
     detail = diag.connection_error_detail(
         RuntimeError("failure environment-secret file-secret")
     )
@@ -193,3 +193,77 @@ def test_source_queries_set_protection_inside_each_transaction(operation):
     ]
     assert events[-1] == "end"
     assert len(events) > 5
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig", "utf-16"])
+def test_configured_password_reads_windows_files_without_changing_them(
+    passfile, encoding, monkeypatch
+):
+    monkeypatch.setenv("PGPASSWORD", "stale-environment-password")
+    passfile.write_text("db:5432:ecm:reader:abc\\:def\\\\xyz\n", encoding=encoding)
+    before = passfile.read_bytes()
+    assert diag.configured_password() == "abc:def\\xyz"
+    assert passfile.read_bytes() == before
+
+
+def test_configured_password_matches_pooler_port(passfile, monkeypatch):
+    monkeypatch.setenv("PGPORT", "6432")
+    passfile.write_text(
+        "db:5432:ecm:reader:wrong-port-password\ndb:6432:ecm:reader:correct-password"
+    )
+    assert diag.configured_password() == "correct-password"
+    passfile.write_text("db:5432:ecm:reader:wrong-port-password")
+    with pytest.raises(diag.PasswordFileError, match="No matching") as error:
+        diag.configured_password()
+    assert "wrong-port-password" not in str(error.value)
+
+
+def test_configured_password_uses_first_matching_entry(passfile):
+    passfile.write_text(
+        "*:*:ecm:reader:first-password\ndb:5432:ecm:reader:second-password"
+    )
+    assert diag.configured_password() == "first-password"
+
+
+@pytest.mark.parametrize("content", ["", "db:5432:ecm:reader:"])
+def test_empty_or_missing_password_file_fails_clearly(passfile, content):
+    with pytest.raises(diag.PasswordFileError, match="cannot be read"):
+        diag.configured_password()
+    passfile.write_text(content)
+    with pytest.raises(diag.PasswordFileError):
+        diag.configured_password()
+
+
+def test_without_explicit_file_or_with_dsn_keeps_libpq_resolution(monkeypatch):
+    monkeypatch.delenv("PGPASSFILE", raising=False)
+    assert diag.configured_password() is None
+    monkeypatch.setenv("PGPASSFILE", "/not-used")
+    monkeypatch.setenv("SYNC_POSTGRES_DSN", "service=production")
+    assert diag.configured_password() is None
+
+
+def test_normal_run_passes_password_from_file_without_prompt(
+    passfile, tmp_path, monkeypatch, caplog
+):
+    import getpass
+
+    passfile.write_text("db:5432:ecm:reader:file-secret", encoding="utf-16")
+    captured = []
+
+    def connect(*args, **kwargs):
+        captured.append(kwargs)
+        return nullcontext(object())
+
+    monkeypatch.setitem(sys.modules, "psycopg", SimpleNamespace(connect=connect))
+    monkeypatch.setattr(getpass, "getpass", lambda *a: pytest.fail("must not prompt"))
+    monkeypatch.setattr(
+        sync_flights, "connect_remote", lambda **kw: nullcontext(object())
+    )
+    monkeypatch.setattr(sync_flights, "sync", lambda *a, **kw: 0)
+    caplog.set_level("INFO")
+    sync_flights.main(
+        ["--dry-run", "--max-windows", "1", "--lock-file", str(tmp_path / "lock")]
+    )
+    assert captured[0]["password"] == "file-secret"
+    assert "password loaded from the matching PGPASSFILE entry" in caplog.text
+    assert "file-secret" not in caplog.text

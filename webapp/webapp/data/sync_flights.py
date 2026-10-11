@@ -13,7 +13,12 @@ from pathlib import Path
 import re
 
 from .quack import connect_remote, sql_literal, transaction
-from .postgres_diagnostics import connection_error_detail, password_file
+from .postgres_diagnostics import (
+    PasswordFileError,
+    configured_password,
+    connection_error_detail,
+    password_file,
+)
 
 LOG = logging.getLogger(__name__)
 PARAMETERS = json.loads(Path(__file__).with_name("sync_parameters.json").read_text())
@@ -661,6 +666,13 @@ def main(argv=None, *, connection_context=nullcontext):
                     raise SourceDataError(
                         "Empty interactive password; connection test cancelled"
                     )
+            else:
+                supplied_password = configured_password()
+                if supplied_password is not None:
+                    LOG.info(
+                        "PostgreSQL password loaded from the matching PGPASSFILE entry"
+                    )
+            if supplied_password is not None:
                 options["password"] = supplied_password
             LOG.info("Connecting to PostgreSQL")
             with psycopg.connect(
@@ -698,7 +710,7 @@ def main(argv=None, *, connection_context=nullcontext):
                         "Sync complete: %s reports processed (including overlaps)",
                         count,
                     )
-    except SourceDataError as exc:
+    except (SourceDataError, PasswordFileError) as exc:
         LOG.error("Sync stopped: %s; checkpoint retained", exc)
         raise SystemExit(1) from None
     except Exception as exc:

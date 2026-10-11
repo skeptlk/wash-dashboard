@@ -128,6 +128,16 @@ Quack token path and SSH destination/key. Store passwords in `PGPASSFILE` using
 scheduled-task account. Adapt PostgreSQL TLS settings to the production certificate
 policy (`verify-full` and `PGSSLROOTCERT` when available).
 
+With the launcher's explicit PG* settings, Python reads `PGPASSFILE` directly and
+passes the first matching password to the driver. UTF-8 (with or without BOM) and
+UTF-16 are supported; the file is not rewritten. The first four fields must match
+`PGHOST:PGPORT:PGDATABASE:PGUSER` (or use `*` wildcards). A pooler connection on 6432
+must match that port in pgpass too. An unreadable file, missing match or empty
+password produces an explicit error before connecting. No password is logged.
+The configured file takes precedence over an inherited `PGPASSWORD`; only
+`--ask-password` overrides it. Direct DSN-based clients or clients without an
+explicit `PGPASSFILE` keep the driver's native credential lookup.
+
 The optional wrapper tunnel uses Windows OpenSSH, key authentication and an existing
 trusted `known_hosts` entry. Run SSH interactively once as the scheduled-task account
 to validate the host and key; do not disable host-key verification. If the key is
@@ -182,7 +192,7 @@ These modes skip SSH/Quack and ingestion, and run only `SELECT 1`. The prompted
 password is not saved. Diagnostics report whether PGPASSFILE can be read, whether
 it has UTF-16/UTF-8 BOM, and whether its first four fields match the explicit PG*
 settings. This is a file-format check, not verification of the password by the
-server. PGPASSWORD in the environment overrides the password file; interactive
+server. The explicit Python file reader overrides `PGPASSWORD`; interactive
 input overrides both. Colons and backslashes inside pgpass fields must be escaped
 as `\:` and `\\`.
 
