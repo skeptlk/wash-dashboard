@@ -86,8 +86,13 @@ def test_interactive_check_bypasses_file_password_and_quack(
     import getpass
 
     calls = []
+    statements = []
+    cursor = SimpleNamespace(
+        execute=lambda sql: statements.append(sql), fetchone=lambda: (1,)
+    )
     connection = SimpleNamespace(
-        execute=lambda sql: SimpleNamespace(fetchone=lambda: (1,))
+        transaction=lambda: nullcontext(),
+        cursor=lambda: nullcontext(cursor),
     )
 
     def connect(*a, **kw):
@@ -107,6 +112,14 @@ def test_interactive_check_bypasses_file_password_and_quack(
         connection_context=lambda: pytest.fail("SSH must not be opened"),
     )
     assert calls[0]["password"] == "typed-secret"
+    assert "options" not in calls[0]
+    assert calls[0]["prepare_threshold"] is None
+    assert statements == [
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+        "SET LOCAL statement_timeout = '5min'",
+        "SET LOCAL TIME ZONE 'UTC'",
+        "SELECT 1",
+    ]
     assert "typed-secret" not in caplog.text
     assert "PostgreSQL check OK" in caplog.text
 
@@ -138,3 +151,45 @@ def test_localized_connection_failure_is_visible_and_interactive_password_is_mas
     assert result.value.code == 1
     assert "нет доступа к серверу" in caplog.text
     assert "typed-secret" not in caplog.text
+
+
+@pytest.mark.parametrize("operation", ["watermarks", "earliest", "window"])
+def test_source_queries_set_protection_inside_each_transaction(operation):
+    from contextlib import contextmanager
+    from datetime import datetime
+
+    events = []
+
+    @contextmanager
+    def transaction():
+        events.append("begin")
+        try:
+            yield
+        finally:
+            events.append("end")
+
+    cursor = SimpleNamespace(
+        execute=lambda sql, *args: events.append(sql),
+        fetchone=lambda: (None,),
+        fetchall=lambda: [],
+        fetchmany=lambda n: [],
+        description=[],
+    )
+    db = SimpleNamespace(transaction=transaction, cursor=lambda: nullcontext(cursor))
+    source = sync_flights.PostgresSource(db)
+    if operation == "watermarks":
+        source.watermarks()
+    elif operation == "earliest":
+        source.earliest("00123", "TAKEOFF")
+    else:
+        source.window(
+            "B737", "00123", "TAKEOFF", datetime(2026, 1, 1), datetime(2026, 1, 2)
+        )
+    assert events[:4] == [
+        "begin",
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+        "SET LOCAL statement_timeout = '5min'",
+        "SET LOCAL TIME ZONE 'UTC'",
+    ]
+    assert events[-1] == "end"
+    assert len(events) > 5

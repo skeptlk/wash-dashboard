@@ -118,13 +118,27 @@ def report_query(family, phase):
         ORDER BY s.flight_datetime, s.engine_position"""
 
 
+@contextmanager
+def postgres_read_cursor(db):
+    """Keep settings inside each transaction, including with transaction pooling.
+
+    Poolers may reject startup options or assign a different backend to the next
+    transaction. SET LOCAL neither relies on nor leaks session-wide settings.
+    """
+    with db.transaction(), db.cursor() as cur:
+        cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        cur.execute("SET LOCAL statement_timeout = '5min'")
+        cur.execute("SET LOCAL TIME ZONE 'UTC'")
+        yield cur
+
+
 class PostgresSource:
     def __init__(self, db, max_rows=20000):
         self.db, self.max_rows = db, max_rows
 
     def watermarks(self):
         # Explicit UTC conversion: source reports are timestamp WITHOUT time zone.
-        with self.db.cursor() as cur:
+        with postgres_read_cursor(self.db) as cur:
             cur.execute("""
                 SELECT n.aircraft_id, a.aircraft_type, n.flight_phase,
                     max(n.last_seen_flight_datetime) AT TIME ZONE 'UTC'
@@ -166,7 +180,7 @@ class PostgresSource:
             return streams
 
     def earliest(self, aircraft, phase):
-        with self.db.cursor() as cur:
+        with postgres_read_cursor(self.db) as cur:
             cur.execute(
                 """
                 SELECT min(dt) FROM (
@@ -183,8 +197,7 @@ class PostgresSource:
 
     def window(self, family, aircraft, phase, start, end):
         # Bound each snapshot to one aircraft/time window, not the whole backlog.
-        with self.db.transaction(), self.db.cursor() as cur:
-            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        with postgres_read_cursor(self.db) as cur:
             cur.execute(
                 report_query(family, phase) + " LIMIT %(row_limit)s",
                 {
@@ -653,15 +666,17 @@ def main(argv=None, *, connection_context=nullcontext):
             with psycopg.connect(
                 os.environ.get("SYNC_POSTGRES_DSN", ""),
                 autocommit=True,
+                prepare_threshold=None,
                 connect_timeout=30,
                 application_name="engine-wash-sync",
-                options="-c default_transaction_read_only=on -c statement_timeout=300000 -c timezone=UTC",
                 **options,
             ) as source_db:
                 LOG.info("PostgreSQL connected")
                 if args.check_postgres:
                     stage = "PostgreSQL SELECT 1"
-                    source_db.execute("SELECT 1").fetchone()
+                    with postgres_read_cursor(source_db) as cur:
+                        cur.execute("SELECT 1")
+                        cur.fetchone()
                     LOG.info("PostgreSQL check OK; no data imported")
                     return
                 stage = "Quack connection"

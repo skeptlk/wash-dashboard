@@ -13,6 +13,15 @@ The supplied `external_schema/schema.sql` describes the three measurement tables
 queries; this table's DDL is **not** included in the supplied schema.
 The read-only account needs SELECT on all six tables.
 
+Connections may use PostgreSQL directly or a pooler in session/transaction mode.
+The client sends no custom startup `options`: some poolers reject
+`default_transaction_read_only` or `statement_timeout` there. Each read transaction
+instead applies `SET TRANSACTION ... READ ONLY`, `SET LOCAL statement_timeout` and
+`SET LOCAL TIME ZONE 'UTC'`. Settings stay with that transaction even if a pooler
+assigns a different backend next time. Automatic prepared statements are disabled
+for compatibility with poolers without prepared-statement tracking. Statement-mode
+pooling does not support the multi-statement snapshots this connector requires.
+
 The operator confirmed that flight timestamps are UTC and `no_data_report` is
 updated **after all three measurement tables have finished loading**. The connector
 converts its `timestamptz` watermark using `AT TIME ZONE 'UTC'`, independent of
