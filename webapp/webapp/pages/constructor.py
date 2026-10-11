@@ -84,6 +84,23 @@ def _controls():
             align="center",
         ),
         rx.vstack(
+            rx.text("Predictions", size="2", weight="medium"),
+            rx.hstack(
+                rx.text("EGT Indication", size="1"),
+                rx.spacer(),
+                rx.switch(
+                    checked=State.egt_indication_enabled,
+                    on_change=State.set_egt_indication,
+                    aria_label="EGT Indication",
+                    size="1",
+                ),
+                width="100%",
+                align="center",
+            ),
+            spacing="2",
+            width="100%",
+        ),
+        rx.vstack(
             rx.hstack(
                 rx.text("Parameters", size="2", weight="medium"),
                 rx.badge(State.selected_params.length().to_string()),

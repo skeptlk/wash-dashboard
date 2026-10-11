@@ -1039,3 +1039,85 @@ def test_parameter_changes_reuse_series_and_preserve_zoom(database, monkeypatch)
         assert len(calls) == 5
 
     asyncio.run(run())
+
+
+def test_constructor_predictions_match_default_model_with_full_history(database):
+    from enginewash import FlightPhase, FlightRecord, predict_egt_failure_enhanced
+    from webapp.data.egt_model import DEFAULT_MODEL_PARAMS
+
+    times = pd.date_range("2025-01-01", periods=80, freq="12h")
+    # Constant EGTHDM: only the cruise DEGT change can trigger a prediction.
+    values = [0.0] * 40 + [40.0] * 40
+    records = [
+        FlightRecord("101", t, "EGTHDM", FlightPhase.TAKEOFF, 30.0)
+        for t in times
+    ]
+    cruise = [
+        FlightRecord("101", t + pd.Timedelta(hours=1), "DEGT", FlightPhase.CRUISE, v)
+        for t, v in zip(times, values)
+    ]
+    with duckdb.connect(str(database)) as db:
+        db.execute("DELETE FROM reports")
+        db.executemany(
+            "INSERT INTO reports (aircraft_type, engine_id, flight_datetime, flight_phase, egthdm, degt) VALUES (?, ?, ?, ?, ?, ?)",
+            [("B737", "101", r.flight_datetime, "TAKEOFF", r.float_value, None) for r in records]
+            + [("B737", "101", r.flight_datetime, "CRUISE", None, r.float_value) for r in cruise],
+        )
+    expected = predict_egt_failure_enhanced("101", records, cruise, **DEFAULT_MODEL_PARAMS)
+    lo, hi = pd.Timestamp("2025-01-25"), pd.Timestamp("2025-01-26")
+    expected = [(t, v) for t, v in expected if lo <= t < hi]
+    assert expected
+    catalog = flight_db.parameter_catalog("B737", database)
+    actual = flight_db.read_egt_predictions(
+        "B737", "101", "2025-01-25", "2025-01-25", catalog=catalog, path=database
+    )
+    assert actual == expected
+    assert flight_db.read_egt_predictions(
+        "B737", "102", "", "", catalog=catalog, path=database
+    ) == []
+    assert flight_db.read_egt_predictions(
+        "B737", "101", "", "", catalog=[], path=database
+    ) == []
+
+
+def test_constructor_prediction_toggle_and_cache(database, monkeypatch):
+    from webapp.state.constructor import ConstructorState
+
+    monkeypatch.setenv("FLIGHT_DATABASE_PATH", str(database))
+    calls = []
+
+    def predict(family, eid, start, end, *, catalog):
+        calls.append((family, eid, start, end))
+        return [(pd.Timestamp("2025-01-02 12:00"), 12.5)]
+
+    monkeypatch.setattr(flight_db, "read_egt_predictions", predict)
+
+    async def run():
+        state = ConstructorState(_reflex_internal_init=True)
+        _ = [item async for item in state.on_load()]
+        assert not calls
+        # Restored LocalStorage value is used by on_load, just like a toggle.
+        state.egt_indication_store = "true"
+        _ = [item async for item in state.on_load()]
+        assert len(calls) == 1
+        prediction = next(t for t in state._chart_figure.data if t.name == "EGT Indication")
+        assert prediction.yaxis == "y" and list(prediction.y) == [12.5]
+        generation = state.chart_data_generation
+        _ = [item async for item in state.set_smoothing_window("10")]
+        assert len(calls) == 1  # Chart smoothing never changes the model.
+        _ = [item async for item in state.set_egt_indication(False)]
+        assert state.egt_indication_store == "false"
+        assert state.chart_data_generation > generation
+        assert not any(t.name == "EGT Indication" for t in state._chart_figure.data)
+        _ = [item async for item in state.set_egt_indication(True)]
+        assert len(calls) == 1
+        _ = [item async for item in state.select_engine("B737:102")]
+        assert calls[-1][:2] == ("B737", "102")
+        _ = [item async for item in state.set_start_date("2025-01-02")]
+        assert calls[-1][2] == "2025-01-02"
+        _ = [item async for item in state.toggle_param("DEGT@CRUISE", True)]
+        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", False)]
+        prediction = next(t for t in state._chart_figure.data if t.name == "EGT Indication")
+        assert prediction.yaxis == "y2"  # Other units use the event axis.
+
+    asyncio.run(run())

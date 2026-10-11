@@ -5,7 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from ..data.egt_params import line_with_gaps, plotly_timestamps
+from ..data.egt_params import EGTHDM_TAKEOFF_ID, line_with_gaps, plotly_timestamps
 from ..data.flight_db import engine_options, read_trends
 
 
@@ -253,4 +253,27 @@ def copy_series(fig, source, row):
         row=row,
         col=1,
         secondary_y=False,
+    )
+
+
+def add_predictions(fig, entry, predictions):
+    """Show EGT values on EGTHDM, and time markers on other parameter rows."""
+    if not predictions:
+        return
+    xs, values = zip(*predictions)
+    egthdm = entry["id"] == EGTHDM_TAKEOFF_ID
+    fig.add_trace(
+        go.Scatter(
+            x=plotly_timestamps(xs),
+            y=np.asarray(values, dtype=float) if egthdm else [0.70] * len(xs),
+            customdata=np.asarray(values, dtype=float),
+            mode="markers",
+            name="EGT Indication",
+            legendgroup="egt_prediction",
+            marker={"symbol": "x", "size": 7, "color": "red"},
+            hovertemplate="%{x|%d.%m.%y, %H:%M:%S}<br>Predicted failure (EGTHDM): %{customdata:.2f}<extra></extra>",
+        ),
+        row=1,
+        col=1,
+        secondary_y=not egthdm,
     )

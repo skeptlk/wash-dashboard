@@ -18,6 +18,7 @@ import reflex as rx
 
 from ..data import LOADED
 from ..data import egt_params
+from ..data.egt_model import DEFAULT_MODEL_PARAMS as _DEFAULT_MODEL_PARAMS
 from ..data import labels as labels_store
 from ..data import versions as versions_store
 from ..components.egt_fig import EgtChartRequest
@@ -29,20 +30,6 @@ from .base import GlobalState
 
 _AIRCRAFT_TYPE = "B737"
 
-# Defaults for the enhanced (EGTHDM + DEGT + decline) failure model, matching
-# the tuned run in enhanced_baseline.ipynb.
-_DEFAULT_MODEL_PARAMS = {
-    "lookback_cycles": 10,
-    "egthdm_threshold": 4.85,
-    "degt_threshold": 2.70,
-    "smoothing_window": 26,
-    "decline_window_days": 5.0,
-    "decline_min_span_days": 2.0,
-    "decline_min_points": 5,
-    "decline_threshold": 4.0,
-    "decline_min_downward_fraction": 0.75,
-    "decline_min_r2": 0.50,
-}
 _INT_MODEL_PARAMS = {"lookback_cycles", "smoothing_window", "decline_min_points"}
 
 

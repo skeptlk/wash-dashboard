@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 import reflex as rx
 
 from ..components.constructor_fig import (
+    add_predictions,
     add_series,
     copy_series,
     empty_chart,
@@ -33,6 +34,11 @@ class ConstructorState(rx.State):
     start_date: str = ""
     end_date: str = ""
     smoothing_window: str = "26"
+    egt_indication_store: str = rx.LocalStorage(
+        "false", name="ew_constructor_egt_indication"
+    )
+    _predictions: list[tuple[datetime, float]] = []
+    _predictions_key: str = ""
     timeline_start: str = ""
     timeline_end: str = ""
     chart_rows: int = 0
@@ -51,6 +57,10 @@ class ConstructorState(rx.State):
     has_chart: bool = False
     is_computing: bool = False
     error: str = ""
+
+    @rx.var
+    def egt_indication_enabled(self) -> bool:
+        return self.egt_indication_store == "true"
 
     @rx.var
     def filtered_engines(self) -> list[dict[str, str]]:
@@ -85,6 +95,7 @@ class ConstructorState(rx.State):
                 self.start_date,
                 self.end_date,
                 self.smoothing_window,
+                self.egt_indication_enabled,
             ]
         )
         if data_key != self._data_key:
@@ -121,6 +132,19 @@ class ConstructorState(rx.State):
             for value in (self.start_date, self.end_date):
                 if value:
                     date.fromisoformat(value)
+            prediction_key = json.dumps(
+                [self.selected_engine, self.start_date, self.end_date]
+            )
+            if self.egt_indication_enabled and prediction_key != self._predictions_key:
+                self._predictions = await asyncio.to_thread(
+                    flight_db.read_egt_predictions,
+                    family,
+                    eid,
+                    self.start_date,
+                    self.end_date,
+                    catalog=list(self.catalog),
+                )
+                self._predictions_key = prediction_key
             catalog = {entry["id"]: entry for entry in self.catalog}
             self._chart_figure = await asyncio.to_thread(
                 empty_chart,
@@ -173,6 +197,8 @@ class ConstructorState(rx.State):
                     1,
                     int(self.smoothing_window),
                 )
+                if self.egt_indication_enabled:
+                    add_predictions(source, entry, self._predictions)
                 for index, trace in enumerate(source.data):
                     trace.meta = f"{pid}:{index}"
                 self._series_cache[pid] = source
@@ -297,6 +323,12 @@ class ConstructorState(rx.State):
         self.selected_params = [p for p in self.selected_params if p != param_id]
         if checked:
             self.selected_params.append(param_id)
+        async for update in self._refresh():
+            yield update
+
+    @rx.event
+    async def set_egt_indication(self, enabled: bool):
+        self.egt_indication_store = "true" if enabled else "false"
         async for update in self._refresh():
             yield update
 

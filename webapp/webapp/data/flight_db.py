@@ -220,3 +220,44 @@ def read_trends(
         if dt is not None and (lo is None or lo <= dt) and (hi is None or dt < hi)
     ]
     return series, sorted(set(events), key=lambda e: e[0])
+
+
+def read_egt_predictions(aircraft_type, engine_id, start, end, *, catalog, path=None):
+    """Run the shared EGT model on full raw history, then clip visible dates."""
+    from enginewash import FlightPhase, FlightRecord, predict_egt_failure_enhanced
+
+    from .egt_model import DEFAULT_MODEL_PARAMS
+    from .egt_params import DEGT_CRUISE_ID, EGTHDM_TAKEOFF_ID
+
+    available = {entry["id"] for entry in catalog}
+    if EGTHDM_TAKEOFF_ID not in available:
+        return []
+    ids = [pid for pid in (EGTHDM_TAKEOFF_ID, DEGT_CRUISE_ID) if pid in available]
+    series, _ = read_trends(
+        aircraft_type, engine_id, ids, "", "", 1, path, catalog=catalog
+    )
+    records = {
+        entry["id"]: [
+            FlightRecord(
+                engine_id=engine_id,
+                flight_datetime=point.flight_datetime,
+                parameter_name=entry["name"],
+                flight_phase=FlightPhase(entry["phase"]),
+                float_value=float(point.value),
+            )
+            for point in frame.itertuples()
+        ]
+        for entry, frame in series
+    }
+    predictions = predict_egt_failure_enhanced(
+        engine_id,
+        records[EGTHDM_TAKEOFF_ID],
+        records.get(DEGT_CRUISE_ID, []),
+        **DEFAULT_MODEL_PARAMS,
+    )
+    lo = pd.Timestamp(start) if start else None
+    hi = pd.Timestamp(end) + pd.Timedelta(days=1) if end else None
+    return [
+        (dt, value) for dt, value in predictions
+        if (lo is None or dt >= lo) and (hi is None or dt < hi)
+    ]
