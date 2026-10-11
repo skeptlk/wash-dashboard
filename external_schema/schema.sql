@@ -7,6 +7,20 @@ CREATE TABLE ecmapp.no_data_report (
 
 -- pivot scripts for each type and engine id merging can be found in /Users/bogdan-korzh/ecm/scripts
 
+CREATE TABLE s7_mdb.aircraft (
+	aircraft_id varchar(16) NOT NULL,
+	aircraft_family varchar(40) NOT NULL,
+	aircraft_type varchar(40) NOT NULL,
+	aircraft_operator varchar(48) NOT NULL,
+	aircraft_owner varchar(48) NOT NULL,
+	mass_units varchar(16) NULL,
+	serviceable_date timestamp NULL,
+	all_installed_flag varchar(6) NULL,
+	incident_flag varchar(6) NULL,
+	aircraft_grp varchar(48) NULL,
+	deletion_flag varchar(6) NULL
+);
+
 CREATE TABLE s7_mdb.aircraft_input (
 	aircraft_id varchar(16) NOT NULL,
 	flight_phase varchar(32) NOT NULL,

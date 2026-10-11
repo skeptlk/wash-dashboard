@@ -248,6 +248,90 @@ def test_new_watermark_overlap_and_same_time_engine_keys(sink):
     assert sink.execute("SELECT count(*) FROM report_parameters").fetchone()[0] == 41
 
 
+@pytest.mark.parametrize(
+    "family, aircraft_type, expected",
+    [
+        ("A320", "A321-200", "A320"),
+        ("Airbus", "A319", "A320"),
+        ("", "A321-200", "A320"),
+        (" b737 ", "unknown", "B737"),
+        ("E170", "ERJ170", "E170"),
+        (None, "ERJ170", "E170"),
+        ("A320", "B737", "A320"),  # Recognized family takes priority.
+        ("A350", "A350-900", None),
+        ("", "", None),
+    ],
+)
+def test_aircraft_registry_family_resolution(family, aircraft_type, expected):
+    assert syncer.aircraft_family(family, aircraft_type) == expected
+
+
+@pytest.fixture
+def registry_source(monkeypatch):
+    # Execute the production watermark SQL using the supplied schema locally.
+    with duckdb.connect() as db:
+        db.execute("CREATE SCHEMA s7_mdb; CREATE SCHEMA ecmapp")
+        schema = Path(__file__).resolve().parents[2] / "external_schema/schema.sql"
+        db.execute(schema.read_text().replace("USING btree", ""))
+
+        @contextmanager
+        def cursor(connection):
+            yield connection
+
+        monkeypatch.setattr(syncer, "postgres_read_cursor", cursor)
+        yield db, syncer.PostgresSource(db)
+
+
+def test_registry_watermarks_skip_missing_and_deduplicate(registry_source, caplog):
+    db, source = registry_source
+    db.execute("""INSERT INTO s7_mdb.aircraft
+        (aircraft_id, aircraft_family, aircraft_type, aircraft_operator, aircraft_owner)
+        VALUES ('02064','A320','A321-200','S7','S7'),
+               ('02064','A320','A321-200','S7','S7'),
+               ('02064','A320','A321','S7','S7'),
+               ('02373','Airbus','A319','S7','S7'),
+               ('99999','A350','A350-900','S7','S7'),
+               ('88888','','','S7','S7');
+        INSERT INTO ecmapp.no_data_report
+        SELECT aircraft, phase, TIMESTAMPTZ '2026-10-11 18:00:00+03'
+        FROM (VALUES ('02064'),('02373'),('07629'),('99999'),('88888')) a(aircraft),
+             (VALUES ('TAKEOFF'),('CRUISE')) p(phase);
+        INSERT INTO ecmapp.no_data_report VALUES
+            ('02064','TAKEOFF','2026-10-10 00:00:00+00'),
+            ('02373','CLIMB','2026-10-11 00:00:00+00'),
+            ('00000','TAKEOFF',NULL);
+    """)
+    with caplog.at_level("INFO"):
+        streams = source.watermarks()
+    assert streams == [
+        ("A320", aircraft, phase, DT(2026, 10, 11, 15))
+        for aircraft in ("02064", "02373")
+        for phase in ("CRUISE", "TAKEOFF")
+    ]
+    warnings = [r.message for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 3
+    assert any("07629" in w and "no matching aircraft_id" in w for w in warnings)
+    assert any("99999" in w and "aircraft_family='A350'" in w for w in warnings)
+    assert any("88888" in w and "aircraft_type=''" in w for w in warnings)
+    assert all("checkpoint unchanged" in w for w in warnings)
+    assert "2 aircraft, 4 streams selected; 3 aircraft skipped" in caplog.text
+
+
+def test_conflicting_registry_families_stop_before_import(registry_source):
+    db, source = registry_source
+    db.execute("""INSERT INTO s7_mdb.aircraft
+        (aircraft_id, aircraft_family, aircraft_type, aircraft_operator, aircraft_owner)
+        VALUES ('02064','A320','A321-200','S7','S7'),
+               ('02064','B737','B737-800','S7','S7');
+        INSERT INTO ecmapp.no_data_report VALUES
+            ('02064','TAKEOFF','2026-10-11 00:00:00+00');
+    """)
+    with pytest.raises(
+        syncer.SourceDataError, match="Ambiguous aircraft family.*02064"
+    ):
+        source.watermarks()
+
+
 def test_source_sql_pivot_matches_exports_and_engine_boundaries():
     # The query uses shared PostgreSQL/DuckDB SQL. Execute against the supplied
     # source DDL locally; this does not replace a real PostgreSQL integration test.

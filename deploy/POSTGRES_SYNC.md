@@ -8,9 +8,8 @@ file. Python 3.12+ x64 is required. No Reflex, DVC or pandas installation is nee
 ## Source contract and pivot
 
 The supplied `external_schema/schema.sql` describes the three measurement tables,
-`ecmapp.no_data_report`, and `s7_mdb.onwing_engine`. Aircraft type also comes from
-`s7_mdb.aircraft(aircraft_id, aircraft_type)`, as in the existing production export
-queries; this table's DDL is **not** included in the supplied schema.
+`ecmapp.no_data_report`, `s7_mdb.onwing_engine`, and the aircraft registry
+`s7_mdb.aircraft(aircraft_id, aircraft_family, aircraft_type)`.
 The read-only account needs SELECT on all six tables.
 
 Connections may use PostgreSQL directly or a pooler in session/transaction mode.
@@ -26,10 +25,18 @@ The operator confirmed that flight timestamps are UTC and `no_data_report` is
 updated **after all three measurement tables have finished loading**. The connector
 converts its `timestamptz` watermark using `AT TIME ZONE 'UTC'`, independent of
 Windows/PostgreSQL session timezone. It processes TAKEOFF and CRUISE independently.
-Aircraft types follow the original export prefixes: `B737% → B737`, `A320% → A320`,
-`ERJ% → E170`. Unsupported types are logged and skipped; missing/ambiguous aircraft
-mapping is an error. E170 CRUISE can be loaded even though the old snapshot only
-contained TAKEOFF.
+The parameter catalog is selected from `aircraft_family` first, falling back to
+`aircraft_type` if the family is not recognized. Prefixes are `B737% → B737`,
+`A319% / A320% / A321% → A320`, and `E170% / ERJ% → E170` (case-insensitive,
+ignoring surrounding whitespace). The destination `aircraft_type` stores this
+catalog family, so A319/A321 reports use the A320 parameters and dashboard group.
+An exact `aircraft_id` match in the registry is required. Missing registry rows or
+unsupported/empty family and type are warned once per aircraft and skipped without
+advancing their checkpoints; the log includes a selected/skipped summary. These
+aircraft will be retried on the next run after the registry or mapping is corrected.
+Duplicate registry rows resolving to the same family do not duplicate streams;
+conflicting mappings stop the run with the aircraft ID and conflicting families.
+E170 CRUISE can be loaded even though the old snapshot only contained TAKEOFF.
 
 `sync_parameters.json` records the parameter lists from the existing
 `ecm/scripts/pivot_tables_{b737,a320,erj}.sql` exports. PostgreSQL performs the pivot:

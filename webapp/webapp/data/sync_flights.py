@@ -53,6 +53,20 @@ class SourceDataError(ValueError):
     """An actionable validation message containing no credentials or SQL."""
 
 
+def aircraft_family(source_family, source_type):
+    """Resolve the parameter catalog from the aircraft registry, family first."""
+    for value in (source_family, source_type):
+        value = (value or "").strip().upper()
+        for prefixes, family in (
+            (("B737",), "B737"),
+            (("A319", "A320", "A321"), "A320"),
+            (("E170", "ERJ"), "E170"),
+        ):
+            if value.startswith(prefixes):
+                return family
+    return None
+
+
 def identifier(value):
     return '"' + value.replace('"', '""') + '"'
 
@@ -152,43 +166,64 @@ class PostgresSource:
         # Explicit UTC conversion: source reports are timestamp WITHOUT time zone.
         with postgres_read_cursor(self.db) as cur:
             cur.execute("""
-                SELECT n.aircraft_id, a.aircraft_type, n.flight_phase,
+                SELECT n.aircraft_id, a.aircraft_id, a.aircraft_family,
+                    a.aircraft_type, n.flight_phase,
                     max(n.last_seen_flight_datetime) AT TIME ZONE 'UTC'
                 FROM ecmapp.no_data_report n
                 LEFT JOIN s7_mdb.aircraft a ON a.aircraft_id = n.aircraft_id
                 WHERE n.last_seen_flight_datetime IS NOT NULL
                   AND n.flight_phase IN ('TAKEOFF', 'CRUISE')
-                GROUP BY n.aircraft_id, a.aircraft_type, n.flight_phase
+                GROUP BY n.aircraft_id, a.aircraft_id, a.aircraft_family,
+                    a.aircraft_type, n.flight_phase
                 ORDER BY n.aircraft_id, n.flight_phase
             """)
             streams = []
-            seen = set()
-            for aircraft, source_type, phase, target in cur.fetchall():
-                if source_type is None:
-                    raise SourceDataError(f"Missing aircraft type for {aircraft}")
-                family = next(
-                    (
-                        f
-                        for prefix, f in (
-                            ("B737", "B737"),
-                            ("A320", "A320"),
-                            ("ERJ", "E170"),
-                        )
-                        if source_type.startswith(prefix)
-                    ),
-                    None,
-                )
-                if family is None:
-                    LOG.warning(
-                        "Skipping unsupported aircraft type %s (%s)",
-                        source_type,
-                        aircraft,
+            seen, stream_keys, skipped = {}, set(), set()
+            for (
+                aircraft,
+                registry_id,
+                source_family,
+                source_type,
+                phase,
+                target,
+            ) in cur.fetchall():
+                family = aircraft_family(source_family, source_type)
+                if aircraft in seen and seen[aircraft] != family:
+                    raise SourceDataError(
+                        f"Ambiguous aircraft family in s7_mdb.aircraft for {aircraft}: "
+                        f"{seen[aircraft]} vs {family} "
+                        f"(aircraft_family={source_family!r}, aircraft_type={source_type!r})"
                     )
+                seen[aircraft] = family
+                if family is None:
+                    if aircraft not in skipped:
+                        if registry_id is None:
+                            LOG.warning(
+                                "Skipping aircraft %r: no matching aircraft_id in "
+                                "s7_mdb.aircraft; checkpoint unchanged",
+                                aircraft,
+                            )
+                        else:
+                            LOG.warning(
+                                "Skipping aircraft %r: unsupported or empty "
+                                "aircraft_family=%r, aircraft_type=%r in "
+                                "s7_mdb.aircraft; checkpoint unchanged",
+                                aircraft,
+                                source_family,
+                                source_type,
+                            )
+                        skipped.add(aircraft)
                     continue
-                if (aircraft, phase) in seen:
-                    raise SourceDataError("Ambiguous aircraft type in s7_mdb.aircraft")
-                seen.add((aircraft, phase))
+                if (aircraft, phase) in stream_keys:
+                    continue
+                stream_keys.add((aircraft, phase))
                 streams.append((family, aircraft, phase, target))
+            LOG.info(
+                "Aircraft registry: %d aircraft, %d streams selected; %d aircraft skipped",
+                len(seen) - len(skipped),
+                len(streams),
+                len(skipped),
+            )
             return streams
 
     def earliest(self, aircraft, phase):
