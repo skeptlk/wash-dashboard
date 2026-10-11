@@ -8,11 +8,15 @@ import math
 import re
 from urllib.parse import parse_qsl
 
-import pandas as pd
 import plotly.graph_objects as go
 import reflex as rx
 
-from ..components.constructor_fig import add_series, copy_series, empty_chart
+from ..components.constructor_fig import (
+    add_series,
+    copy_series,
+    empty_chart,
+    update_time_ticks,
+)
 from ..data import flight_db
 from ..data.egt_params import DEFAULT_PARAMS
 
@@ -76,7 +80,12 @@ class ConstructorState(rx.State):
     async def _refresh(self):
         self.error = ""
         data_key = json.dumps(
-            [self.selected_engine, self.start_date, self.end_date, self.smoothing_window]
+            [
+                self.selected_engine,
+                self.start_date,
+                self.end_date,
+                self.smoothing_window,
+            ]
         )
         if data_key != self._data_key:
             self._data_key = data_key
@@ -87,7 +96,9 @@ class ConstructorState(rx.State):
         else:
             for row, pid in enumerate(self._figure_params):
                 if pid in self._series_cache:
-                    axis = self._chart_figure.layout[f"yaxis{2 * row + 1 if row else ''}"]
+                    axis = self._chart_figure.layout[
+                        f"yaxis{2 * row + 1 if row else ''}"
+                    ]
                     self._series_cache[pid].update_yaxes(
                         range=axis.range, autorange=axis.autorange, secondary_y=False
                     )
@@ -222,7 +233,9 @@ class ConstructorState(rx.State):
     async def _select(self, key):
         if not any(e["key"] == key for e in self.engines):
             raise ValueError("Unknown engine")
-        family, eid = key.split(":", 1)
+        family, _ = key.split(":", 1)
+        if key != self.selected_engine:
+            self.timeline_start = self.timeline_end = ""
         self.selected_engine = key
         if family != self._catalog_family or not self.catalog:
             self.catalog = await asyncio.to_thread(flight_db.parameter_catalog, family)
@@ -234,15 +247,6 @@ class ConstructorState(rx.State):
             or [p for p in DEFAULT_PARAMS if p in available]
             or [e["id"] for e in self.catalog[:1]]
         )
-        if not self.start_date and not self.end_date:
-            lo, hi = await asyncio.to_thread(flight_db.date_bounds, family, eid)
-            if lo is not None:
-                self.start_date = (
-                    max(pd.Timestamp(lo), pd.Timestamp(hi) - pd.DateOffset(years=2))
-                    .date()
-                    .isoformat()
-                )
-                self.end_date = hi.date().isoformat()
 
     @rx.event
     async def on_load(self):
@@ -403,6 +407,7 @@ class ConstructorState(rx.State):
             else None,
             autorange=not bool(self.timeline_start),
         )
+        update_time_ticks(self._chart_figure, self.timeline_start, self.timeline_end)
 
     @rx.event
     def on_plot_relayout(self, data: dict):

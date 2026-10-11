@@ -237,6 +237,26 @@ def constructor_page():
                         flex="1",
                         overflow_y="auto",
                         overflow_x="hidden",
+                        style={
+                            "& .modebar-container": {
+                                "top": "auto !important",
+                                "bottom": "0",
+                            },
+                            "& .js-plotly-plot .plotly .modebar": {
+                                "top": "auto",
+                                "bottom": "2px",
+                            },
+                            "& .js-plotly-plot .plotly .modebar [data-title]::before, & .js-plotly-plot .plotly .modebar [data-title]::after": {
+                                "top": "auto",
+                                "bottom": "110%",
+                            },
+                            "& .js-plotly-plot .plotly .modebar [data-title]::before": {
+                                "margin_top": "0",
+                                "margin_bottom": "-12px",
+                                "border_bottom_color": "transparent",
+                                "border_top_color": "#69738a",
+                            },
+                        },
                     ),
                     rx.cond(
                         State.error == "",

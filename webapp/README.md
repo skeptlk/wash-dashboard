@@ -115,6 +115,10 @@ stopped; explicit file paths in fixture tests also use that mode.
 
 The database contains:
 
+- `aircraft`: one row per aircraft ID, with the source `aircraft_family` and
+  actual model in `aircraft_type` (for example, A321-200). Constructor joins the
+  latest aircraft for each engine to this table for its list and chart titles;
+  parameter queries still use the report family (A320/B737/E170).
 - `reports`: one wide table containing the union of all source columns, plus
   `aircraft_type`. `flight_phase` distinguishes reports. Columns absent from a
   source are NULL. Source row counts, duplicates, null engine IDs, measurements
@@ -126,6 +130,20 @@ The database contains:
 - `import_sources`: source URLs, imported row counts and import timestamps.
 - `constructor_reports`: view installed by the Quack service to retain source
   row ordering for duplicate timestamps without changing the report columns.
+
+The aircraft table starts empty. Import a production CSV through the running
+Quack service using the same connection environment as Constructor:
+
+```bash
+PYTHONPATH=webapp python -m webapp.data.import_aircraft /path/to/aircraft.csv
+```
+
+The importer keeps `aircraft_id`, `aircraft_family` and `aircraft_type`, preserves
+leading zeros, deduplicates matching models and rejects conflicting models for
+one ID. Repeated imports update those IDs atomically and retain other aircraft.
+An aircraft missing from the reference uses the report family as its label.
+Empty Constructor date fields show the full engine history; entered bounds stay
+in effect when switching engines, while the previous chart zoom is reset.
 
 The report grain is an engine-position observation at its original report
 timestamp, not a takeoff/cruise join. No uniqueness constraint or synthetic

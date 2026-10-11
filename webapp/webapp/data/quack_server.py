@@ -10,6 +10,7 @@ import threading
 import duckdb
 
 from .flight_db import database_path
+from .import_aircraft import CREATE_AIRCRAFT_SQL
 from .quack import DEFAULT_URI, extension_config, token
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ def serve(stop: threading.Event) -> None:
         # Fail early on an incomplete/wrong database, before opening the listener.
         for table in ("reports", "onwing", "report_parameters", "import_sources"):
             db.execute(f"SELECT * FROM {table} LIMIT 0")
+        db.execute(CREATE_AIRCRAFT_SQL)
         # Quack 1.5.6 cannot ATTACH a catalog containing a function-valued
         # column default (e.g. current_timestamp). Existing timestamps survive;
         # the migration now supplies imported_at explicitly instead.

@@ -210,6 +210,7 @@ def test_constructor_switches_families_and_shows_errors(database, monkeypatch):
         assert "EMB_ONLY@TAKEOFF" in state.selected_params
         _ = [item async for item in state.select_engine("B737:101")]
         assert "EMB_ONLY@TAKEOFF" not in state.selected_params
+        _ = [item async for item in state.set_start_date("2025-01-01")]
         _ = [item async for item in state.set_end_date("2020-01-01")]
         assert not state.has_chart and "Start date" in state.error
         monkeypatch.setenv(
@@ -620,6 +621,7 @@ def test_progressive_empty_first_row_and_later_failure(database, monkeypatch):
         assert len(state.chart_figure.data[0].x) == 0
         await state.load_next_parameter(state.chart_generation, 1)
         assert state.has_chart and not state.is_computing
+        _ = [item async for item in state.set_end_date("2025-01-03")]
         _ = [item async for item in state.set_start_date("2026-01-01")]
         assert state.error  # invalid date order stops loading
         state.start_date = "2025-01-01"
@@ -778,6 +780,86 @@ def test_subplot_titles_use_registration_from_engine_list(database, monkeypatch)
     assert fig.layout.annotations[0].text == (
         "EGTHDM (Takeoff), ESN = 101, Pos = 1, RA-73424, A320"
     )
+
+
+def test_aircraft_model_uses_latest_aircraft_without_changing_family(database):
+    with duckdb.connect(str(database)) as db:
+        db.execute("INSERT INTO aircraft VALUES ('00456', 'A320', 'A321-200')")
+        db.execute("""UPDATE reports SET aircraft_id='00456'
+            WHERE aircraft_type='A320' AND engine_id='101'
+            AND flight_datetime > '2025-01-03'""")
+    options = {e["key"]: e for e in flight_db.engine_options(database)}
+    assert options["A320:101"]["label"] == "101: A321-200 00456"
+    assert options["A320:101"]["aircraft_type"] == "A320"
+    assert options["B737:101"]["aircraft_model"] == "B737"
+    fig = build_chart("A320", "101", ["EGTHDM@TAKEOFF"], "", "", path=database)
+    assert fig.layout.annotations[0].text.endswith("00456, A321-200")
+
+
+def test_empty_dates_follow_each_engine_full_history_and_reset_zoom(
+    database, monkeypatch
+):
+    from webapp.state.constructor import ConstructorState
+
+    monkeypatch.setenv("FLIGHT_DATABASE_PATH", str(database))
+    with duckdb.connect(str(database)) as db:
+        db.execute("""UPDATE reports SET flight_datetime=flight_datetime + INTERVAL '4 years'
+            WHERE engine_id='102'""")
+
+    async def run():
+        state = ConstructorState(_reflex_internal_init=True)
+        state.selected_engine = "B737:101"
+        _ = [item async for item in state.on_load()]
+        assert state.start_date == state.end_date == ""
+        assert len(state.chart_figure.data[0].x) == 3
+        state.on_plot_relayout({"xaxis.range": ["2025-01-02", "2025-01-03"]})
+        _ = [item async for item in state.select_engine("B737:102")]
+        assert state.start_date == state.end_date == ""
+        assert state.timeline_start == state.timeline_end == ""
+        assert state.chart_figure.layout.xaxis.autorange
+        assert state.has_chart and len(state.chart_figure.data[0].x) == 1
+        assert pd.to_datetime(state.chart_figure.data[0].x[0], unit="ms").year == 2029
+        _ = [item async for item in state.set_start_date("2029-01-01")]
+        _ = [item async for item in state.select_engine("B737:101")]
+        assert state.start_date == "2029-01-01" and state.end_date == ""
+
+    asyncio.run(run())
+
+
+def test_time_ticks_include_last_reading_and_follow_zoom():
+    import plotly.graph_objects as go
+    from webapp.components.constructor_fig import empty_chart, update_time_ticks
+    from webapp.data.egt_params import plotly_timestamps
+
+    fig = empty_chart("B737", "101", [{"name": "EGTHDM", "phase": "TAKEOFF"}])
+    fig.add_trace(
+        go.Scatter(x=plotly_timestamps(["2022-01-01", "2026-09-14"]), name="Raw")
+    )
+    update_time_ticks(fig)
+    assert len(fig.layout.xaxis.tickvals) == 12
+    assert pd.Timestamp(fig.layout.xaxis.tickvals[-1]) == pd.Timestamp("2026-09-14")
+    fig.add_trace(go.Scatter(x=plotly_timestamps(["2016-07-01"]), name="Install"))
+    update_time_ticks(fig)
+    assert pd.Timestamp(fig.layout.xaxis.tickvals[0]) == pd.Timestamp("2016-07-01")
+    assert pd.Timestamp(fig.layout.xaxis.tickvals[-1]) == pd.Timestamp("2026-09-14")
+    update_time_ticks(fig, "2023-01-01", "2024-01-01")
+    assert pd.Timestamp(fig.layout.xaxis.tickvals[0]) == pd.Timestamp("2023-01-01")
+    assert pd.Timestamp(fig.layout.xaxis.tickvals[-1]) == pd.Timestamp("2024-01-01")
+
+
+def test_quack_aircraft_import(tmp_path, quack_database):
+    from webapp.data.import_aircraft import import_aircraft
+    from webapp.data.quack import connect_remote
+
+    source = tmp_path / "aircraft.csv"
+    source.write_text("aircraft_id,aircraft_family,aircraft_type\n123,A320,A321-200\n")
+    assert import_aircraft(source) == import_aircraft(source) == 1
+    with connect_remote() as db:
+        assert db.execute("SELECT * FROM aircraft").fetchall() == [
+            ("00123", "A320", "A321-200")
+        ]
+    option = next(e for e in flight_db.engine_options() if e["key"] == "A320:101")
+    assert "A321-200" in option["label"]
 
 
 def test_parameter_changes_reuse_series_and_preserve_zoom(database, monkeypatch):

@@ -18,6 +18,7 @@ import pandas as pd
 from pandas.api.types import is_numeric_dtype
 
 from .flight_db import META_COLUMNS, database_path
+from .import_aircraft import CREATE_AIRCRAFT_SQL
 from .registry import AIRCRAFT_DATA_REGISTRY
 
 
@@ -63,6 +64,7 @@ def migrate(
 
         counts = []
         with duckdb.connect(str(staging)) as db:
+            db.execute(CREATE_AIRCRAFT_SQL)
             db.execute(
                 "CREATE TABLE report_parameters (aircraft_type VARCHAR, flight_phase VARCHAR, column_name VARCHAR)"
             )

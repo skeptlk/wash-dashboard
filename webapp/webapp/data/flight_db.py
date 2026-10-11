@@ -77,21 +77,29 @@ def connect(path: Path | None = None):
 def engine_options(path: Path | None = None) -> list[dict]:
     with connect(path) as db:
         rows = db.execute("""
-            SELECT aircraft_type, engine_id, arg_max(aircraft_id, flight_datetime),
-                arg_max(engine_position, flight_datetime)
-            FROM reports WHERE engine_id IS NOT NULL AND flight_datetime IS NOT NULL
-            GROUP BY aircraft_type, engine_id ORDER BY aircraft_type, engine_id
+            WITH engines AS (
+                SELECT aircraft_type, engine_id,
+                    arg_max(aircraft_id, flight_datetime) AS aircraft_id,
+                    arg_max(engine_position, flight_datetime) AS engine_position
+                FROM reports WHERE engine_id IS NOT NULL AND flight_datetime IS NOT NULL
+                GROUP BY aircraft_type, engine_id
+            )
+            SELECT e.aircraft_type, e.engine_id, e.aircraft_id, e.engine_position,
+                coalesce(a.aircraft_type, e.aircraft_type)
+            FROM engines e LEFT JOIN aircraft a USING (aircraft_id)
+            ORDER BY e.aircraft_type, e.engine_id
         """).fetchall()
     return [
         {
             "id": eid,
             "aircraft_type": family,
             "key": f"{family}:{eid}",
-            "label": f"{eid}: {family} {AIRCRAFT_REG.get(aid, aid) or ''}",
+            "aircraft_model": model,
+            "label": f"{eid}: {model} {AIRCRAFT_REG.get(aid, aid) or ''}",
             "registration": AIRCRAFT_REG.get(aid, aid) or "?",
             "position": str(pos) if pos is not None else "?",
         }
-        for family, eid, aid, pos in rows
+        for family, eid, aid, pos, model in rows
     ]
 
 

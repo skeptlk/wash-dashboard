@@ -1,6 +1,7 @@
 """Constructor trend chart, built exclusively from DuckDB query results."""
 
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -23,6 +24,7 @@ def build_chart(aircraft_type, engine_id, params, start, end, window=26, path=No
     fig = empty_chart(aircraft_type, engine_id, [entry for entry, _ in series], engine)
     for row, (entry, frame) in enumerate(series, 1):
         add_series(fig, entry, frame, events, row, window)
+    update_time_ticks(fig)
     return fig
 
 
@@ -35,20 +37,21 @@ def empty_chart(aircraft_type, engine_id, entries, engine=None):
         cols=1,
         shared_xaxes=True,
         specs=[[{"secondary_y": True}] for _ in entries],
-        vertical_spacing=min(0.085, 0.7 / max(1, rows - 1)),
+        # Reserve enough room for X labels and the next row's title.
+        vertical_spacing=min(0.06, 0.35 / max(1, rows - 1)),
         subplot_titles=[
             f"{e['name']} ({e['phase'].title()}), ESN = {engine_id}, "
             f"Pos = {engine.get('position', '?')}, "
-            f"{engine.get('registration', '?')}, {aircraft_type}"
+            f"{engine.get('registration', '?')}, {engine.get('aircraft_model', aircraft_type)}"
             for e in entries
         ],
     )
-    fig.update_annotations(x=0, xanchor="left", font_size=12, yshift=3)
+    fig.update_annotations(x=0, xanchor="left", font_size=12, yshift=-2)
     fig.update_layout(
         template="plotly_white",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        margin={"l": 66, "r": 16, "t": 48, "b": 38},
+        margin={"l": 33, "r": 8, "t": 48, "b": 64},
         font={"family": "Inter, system-ui, sans-serif", "size": 11},
         legend={
             "orientation": "h",
@@ -64,13 +67,50 @@ def empty_chart(aircraft_type, engine_id, entries, engine=None):
     fig.update_xaxes(
         type="date",
         tickformat="%d.%m.%y",
+        nticks=14,
         showticklabels=True,
         gridcolor="rgba(128,128,128,0.12)",
         zeroline=False,
     )
-    fig.update_yaxes(gridcolor="rgba(128,128,128,0.15)", zeroline=False, nticks=5)
+    fig.update_yaxes(
+        gridcolor="rgba(128,128,128,0.15)", zeroline=False, nticks=5, automargin=True
+    )
     fig.update_yaxes(range=[0, 1], fixedrange=True, visible=False, secondary_y=True)
     return fig
+
+
+def update_time_ticks(fig, start="", end=""):
+    """Show twelve dates across the visible readings, including the last point."""
+    bounds = [
+        (np.min(trace.x), np.max(trace.x))
+        for trace in fig.data
+        if trace.name == "Raw" and len(trace.x)
+    ]
+    if not bounds:
+        return
+    # Historical installation markers can extend autorange before the readings.
+    # Label that part of the timeline too, while ending at the last reading.
+    lo = pd.to_datetime(
+        min(np.nanmin(trace.x) for trace in fig.data if len(trace.x)), unit="ms"
+    )
+    hi = pd.to_datetime(max(b[1] for b in bounds), unit="ms")
+    if start:
+        lo = max(lo, pd.Timestamp(start))
+        hi = min(hi, pd.Timestamp(end))
+    if lo > hi:
+        fig.update_xaxes(tickmode="auto", tickvals=None)
+        return
+    # Avoid repeating day labels on short ranges; zoomed views include the time.
+    span = hi - lo
+    frequency = "%d.%m.%y" if span >= pd.Timedelta(days=11) else "%d.%m %H:%M"
+    if span < pd.Timedelta(minutes=11):
+        frequency = "%H:%M:%S"
+    ticks = pd.date_range(lo, hi, periods=12) if lo < hi else [lo]
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=[dt.isoformat() for dt in ticks],
+        tickformat=frequency,
+    )
 
 
 def add_series(fig, entry, frame, events, row, window):
