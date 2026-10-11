@@ -289,8 +289,32 @@ def test_source_sql_pivot_matches_exports_and_engine_boundaries():
             (aircraft_id,engine_position,install_datetime,engine_id,aircraft_family,engine_family,number_removals)
             VALUES ('00123',1,'2025-01-01','overlap','B737','CFM',0)""")
         result = db.execute(sql, params)
-        with pytest.raises(ValueError, match="Overlapping"):
+        assert (
+            syncer.prepare_rows("B737", cols, result.fetchall())[0]["engine_id"]
+            == "new"
+        )
+        db.execute("""INSERT INTO s7_mdb.onwing_engine
+            (aircraft_id,engine_position,install_datetime,engine_id,aircraft_family,engine_family,number_removals)
+            VALUES ('00123',1,'2025-01-03','newest','B737','CFM',0),
+                   ('00123',1,'2025-01-05','future','B737','CFM',0)""")
+        result = db.execute(sql, params)
+        records = syncer.prepare_rows("B737", cols, result.fetchall())
+        assert records[0]["engine_id"] == "new"
+        assert records[2]["engine_id"] == "newest"
+        assert "_install_datetime" not in records[2]
+        db.execute("""INSERT INTO s7_mdb.onwing_engine
+            (aircraft_id,engine_position,install_datetime,engine_id,aircraft_family,engine_family,number_removals)
+            VALUES ('00123',1,'2025-01-03','conflict','B737','CFM',0)""")
+        result = db.execute(sql, params)
+        with pytest.raises(
+            ValueError, match="Ambiguous latest onwing installation"
+        ) as caught:
             syncer.prepare_rows("B737", cols, result.fetchall())
+        assert "aircraft=00123" in str(caught.value) and "position=1" in str(
+            caught.value
+        )
+        assert "2025-01-03" in str(caught.value)
+        assert "conflict" in str(caught.value) and "newest" in str(caught.value)
         for family, phases in syncer.PARAMETERS.items():
             for phase in phases:
                 query = re.sub(

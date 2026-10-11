@@ -44,8 +44,11 @@ through the server. No service restart is needed for those schema changes; reloa
 the dashboard page to refresh an already-loaded parameter selector.
 
 Engine IDs join on aircraft, position and `[install_datetime, removal_datetime)`.
-An absent match stays NULL. Overlapping intervals with distinct engine IDs stop the
-batch rather than choosing an arbitrary engine. `deletion_flag` is retained as in
+Among intervals covering that report, the latest `install_datetime` wins. Future
+installations are never assigned to historical reports. An absent match stays
+NULL. Distinct engine IDs tied at the latest installation timestamp stop the batch;
+the error includes aircraft, position, flight time, installation time and candidate
+engine IDs. `deletion_flag` is retained as in
 the previous export; it is not used as an undocumented filter. Each committed window
 also refreshes that aircraft's `onwing` history from the same source snapshot.
 Existing `n1_modifier` values and columns outside this import are preserved on
@@ -167,6 +170,12 @@ required. Logs rotate under `data\sync-logs\sync.log`; SSH errors are separate.
 Exit 0 means success, unchanged state, or a requested window budget reached. Exit 1
 means failure; previously committed windows remain safe. Driver error SQL and
 credentials are not logged. Connection logs identify the PostgreSQL/Quack stage.
+Quack logs include the local DuckDB version and extension directory, and distinguish
+token reading, client initialization, extension loading, catalog attachment and
+catalog selection. Failures preserve the original driver detail with the supplied
+token, its SQL-escaped/URL-encoded forms and endpoint URI masked. Windows token
+files may be UTF-8 (with/without BOM) or UTF-16. A failure during Quack connection
+happens before the connector reads `onwing` or source reports.
 Recognized PostgreSQL errors explain missing/rejected passwords, DNS, TCP, SSL,
 server access rules, or missing database/user, and include SQLSTATE when available.
 Unclassified errors require checking PostgreSQL server logs for application

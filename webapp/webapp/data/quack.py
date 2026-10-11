@@ -5,13 +5,34 @@ from __future__ import annotations
 import os
 import atexit
 import hashlib
+import logging
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
+from urllib.parse import quote
 
 import duckdb
 
 DEFAULT_URI = "quack:127.0.0.1:9494"
+LOG = logging.getLogger(__name__)
+
+
+class QuackConnectionError(RuntimeError):
+    """Connection failure with a safe stage and redacted driver diagnostic."""
+
+
+def connection_detail(exc, credential="", uri=""):
+    text = str(exc)
+    for secret in sorted(
+        {credential, credential.replace("'", "''"), quote(credential, safe=""), uri}
+        - {""},
+        key=len,
+        reverse=True,
+    ):
+        text = text.replace(secret, "[redacted]")
+    text = re.sub(r"(?i)(bearer\s+)\S+", r"\1[redacted]", text)
+    return " | ".join(text.splitlines())[:4000]
 
 
 class ReadConnectionPool:
@@ -79,11 +100,14 @@ def extension_config() -> dict[str, str]:
 def token() -> str:
     """Read server-side credentials; never include them in logs or Reflex state."""
     filename = os.environ.get("QUACK_TOKEN_FILE")
-    value = (
-        Path(filename).expanduser().read_text().strip()
-        if filename
-        else os.environ.get("QUACK_TOKEN", "").strip()
-    )
+    if filename:
+        raw = Path(filename).expanduser().read_bytes()
+        encoding = (
+            "utf-16" if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
+        )
+        value = raw.decode(encoding).strip()
+    else:
+        value = os.environ.get("QUACK_TOKEN", "").strip()
     if len(value) < 32:
         raise ValueError(
             "Set QUACK_TOKEN_FILE or QUACK_TOKEN to a random token of at least 32 characters."
@@ -105,23 +129,42 @@ def connect_remote(*, read_only: bool = True) -> duckdb.DuckDBPyConnection:
     uri = os.environ.get("FLIGHT_QUACK_URL", DEFAULT_URI)
     if not uri.startswith("quack:"):
         raise ValueError("FLIGHT_QUACK_URL must be a quack: URI.")
-    credential = token()
-    db = duckdb.connect(config=extension_config())
+    credential, db = "", None
+    stage = "reading Quack credentials"
     try:
+        credential = token()
+        stage = "initializing DuckDB client"
+        LOG.info(
+            "Quack: DuckDB %s; extension_directory=%s; read_only=%s",
+            duckdb.__version__,
+            repr(extension_config().get("extension_directory", "default")),
+            read_only,
+        )
+        db = duckdb.connect(config=extension_config())
         # Extensions are installed during deployment, not on every connection.
+        stage = "loading Quack extension"
+        LOG.info("Quack: loading extension")
         db.execute("LOAD quack")
         options = f"TYPE quack, TOKEN {sql_literal(credential)}"
         if read_only:
             options += ", READ_ONLY"
+        stage = "attaching remote Quack catalog"
+        LOG.info("Quack: attaching remote catalog")
         db.execute(f"ATTACH {sql_literal(uri)} AS flights ({options})")
+        stage = "selecting remote Quack catalog"
         db.execute("USE flights")
         return db
-    except Exception:
-        db.close()
+    except Exception as exc:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
         # DuckDB parser/transport errors may echo the ATTACH SQL and its token.
-        raise RuntimeError(
-            "Could not connect to the flight Quack service. Check the service, "
-            "FLIGHT_QUACK_URL, credentials and the installed Quack extension."
+        raise QuackConnectionError(
+            f"Could not connect to the flight Quack service during {stage} "
+            f"({type(exc).__name__}; DuckDB {duckdb.__version__}). "
+            f"Detail: {connection_detail(exc, credential, uri)}"
         ) from None
 
 

@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import re
 
-from .quack import connect_remote, sql_literal, transaction
+from .quack import QuackConnectionError, connect_remote, sql_literal, transaction
 from .postgres_diagnostics import (
     PasswordFileError,
     configured_password,
@@ -108,17 +108,24 @@ def report_query(family, phase):
     return f"""WITH {", ".join(ctes)}
         SELECT s.aircraft_id, s.engine_position, s.flight_datetime,
             %(phase)s::text AS flight_phase, {", ".join(selections)},
-            h.engine_id, h.engine_matches AS _engine_matches
+            h.engine_id, h.engine_matches AS _engine_matches,
+            h.engine_candidates AS _engine_candidates, h.install_datetime AS _install_datetime
         FROM spine s
         LEFT JOIN engine_input USING (aircraft_id, engine_position, flight_datetime)
         LEFT JOIN engine_raw_output USING (aircraft_id, engine_position, flight_datetime)
         LEFT JOIN aircraft_input USING (aircraft_id, flight_datetime)
         LEFT JOIN LATERAL (
-            SELECT min(engine_id) AS engine_id, count(DISTINCT engine_id) AS engine_matches
-            FROM s7_mdb.onwing_engine o
-            WHERE o.aircraft_id = s.aircraft_id AND o.engine_position = s.engine_position
-              AND o.install_datetime <= s.flight_datetime
-              AND (o.removal_datetime IS NULL OR s.flight_datetime < o.removal_datetime)
+            SELECT min(engine_id) AS engine_id, count(DISTINCT engine_id) AS engine_matches,
+                string_agg(DISTINCT engine_id, ', ' ORDER BY engine_id) AS engine_candidates,
+                max(install_datetime) AS install_datetime
+            FROM (
+                SELECT o.engine_id, o.install_datetime,
+                    dense_rank() OVER (ORDER BY o.install_datetime DESC) AS installation_rank
+                FROM s7_mdb.onwing_engine o
+                WHERE o.aircraft_id = s.aircraft_id AND o.engine_position = s.engine_position
+                  AND o.install_datetime <= s.flight_datetime
+                  AND (o.removal_datetime IS NULL OR s.flight_datetime < o.removal_datetime)
+            ) candidates WHERE installation_rank = 1
         ) h ON TRUE
         ORDER BY s.flight_datetime, s.engine_position"""
 
@@ -231,9 +238,13 @@ def prepare_rows(family, columns, rows):
     records = []
     for row in rows:
         record = dict(zip(columns, row, strict=True))
+        candidates = record.pop("_engine_candidates", None)
+        installed = record.pop("_install_datetime", None)
         if record.pop("_engine_matches") > 1:
             raise SourceDataError(
-                "Overlapping onwing intervals map a report to multiple engines"
+                "Ambiguous latest onwing installation: "
+                f"aircraft={record['aircraft_id']}, position={record['engine_position']}, "
+                f"flight={record['flight_datetime']}, install={installed}, engines={candidates}"
             )
         record["aircraft_type"] = family
         record["aircraft_id"] = str(record["aircraft_id"]).zfill(5)
@@ -712,6 +723,9 @@ def main(argv=None, *, connection_context=nullcontext):
                     )
     except (SourceDataError, PasswordFileError) as exc:
         LOG.error("Sync stopped: %s; checkpoint retained", exc)
+        raise SystemExit(1) from None
+    except QuackConnectionError as exc:
+        LOG.error("%s; checkpoint retained", exc)
         raise SystemExit(1) from None
     except Exception as exc:
         # Driver exceptions may contain connection strings/passwords or SQL data.
