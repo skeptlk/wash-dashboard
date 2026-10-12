@@ -1,5 +1,7 @@
 """Constructor trend chart, built exclusively from DuckDB query results."""
 
+import base64
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -79,19 +81,24 @@ def empty_chart(aircraft_type, engine_id, entries, engine=None):
     return fig
 
 
+def trace_x_values(trace):
+    """Plotly restores persisted NumPy arrays as its binary transport dicts."""
+    values = trace.x
+    if isinstance(values, dict) and "bdata" in values:
+        return np.frombuffer(base64.b64decode(values["bdata"]), dtype=values["dtype"])
+    return values if values is not None else ()
+
+
 def update_time_ticks(fig, start="", end=""):
     """Show twelve dates across the visible readings, including the last point."""
+    series = [(trace.name, trace_x_values(trace)) for trace in fig.data]
     bounds = [
-        (np.min(trace.x), np.max(trace.x))
-        for trace in fig.data
-        if trace.name == "Raw" and len(trace.x)
+        (np.min(xs), np.max(xs)) for name, xs in series if name == "Raw" and len(xs)
     ]
     if not bounds:
         return
     # Include any visible event before the readings, ending at the last reading.
-    lo = pd.to_datetime(
-        min(np.nanmin(trace.x) for trace in fig.data if len(trace.x)), unit="ms"
-    )
+    lo = pd.to_datetime(min(np.nanmin(xs) for _, xs in series if len(xs)), unit="ms")
     hi = pd.to_datetime(max(b[1] for b in bounds), unit="ms")
     if start:
         lo = max(lo, pd.Timestamp(start))

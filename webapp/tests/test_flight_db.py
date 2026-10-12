@@ -1198,3 +1198,43 @@ def test_constructor_switches_before_old_request_finishes(database, monkeypatch,
         assert not state.error and not state._loading_param
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("persisted", [False, True])
+def test_constructor_reload_resends_cached_arrays_and_catalog(database, monkeypatch, persisted):
+    """A browser reload has no trace cache, even when server state survives."""
+    from reflex.utils.serializers import serialize
+    from webapp.state.constructor import ConstructorState
+
+    monkeypatch.setenv("FLIGHT_DATABASE_PATH", str(database))
+    calls = []
+    original = flight_db.read_trends
+
+    def read(*args, **kwargs):
+        calls.append(args[2])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(flight_db, "read_trends", read)
+
+    async def run():
+        state = ConstructorState(_reflex_internal_init=True)
+        state.selected_engine = "B737:101"
+        await _settle(state, state.on_load())
+        await ConstructorState.load_next_parameter.fn(state, state.chart_generation, 1)
+        assert len(calls) == 2
+        if persisted:
+            import pickle
+            state._chart_figure = pickle.loads(pickle.dumps(state._chart_figure))
+            state._series_cache = pickle.loads(pickle.dumps(dict(state._series_cache)))
+        state._clean()
+        await _settle(state, state.on_load())
+        assert len(calls) == 2  # reuse SQL results, not the vanished browser cache
+        wire = serialize(state.chart_figure)
+        raw = [trace for trace in wire['data'] if trace['name'] == 'Raw']
+        assert len(raw) == 2 and all('x' in t and 'y' in t for t in raw)
+        delta = state.get_delta()[state.get_full_name()]
+        assert delta['catalog_rx_state_']
+        assert delta['selected_engine_rx_state_'] == 'B737:101'
+        assert state.has_chart and not state.is_computing
+
+    asyncio.run(run())

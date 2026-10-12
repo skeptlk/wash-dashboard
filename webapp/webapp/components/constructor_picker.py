@@ -27,7 +27,7 @@ const ConstructorPicker = memo(function ConstructorPicker({options, selected, mu
                 multiple && h('div', {style: {fontSize: 12, color: 'var(--gray-10)', margin: '4px 0'}},
                     phase === 'TAKEOFF' ? 'Takeoff' : 'Cruise'),
                 filtered.filter(item => !multiple || item.phase === phase).map(item => {
-                    const id = item.id || item.key;
+                    const id = multiple ? item.id : item.key;
                     const checked = selected.includes(id);
                     return multiple
                         ? h('label', {key: id, style: {display: 'flex', alignItems: 'center',

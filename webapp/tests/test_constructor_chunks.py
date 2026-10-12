@@ -68,3 +68,37 @@ assert.equal(cachedRef.current.cache.has('B:0'), false);
         ],
         check=True,
     )
+
+
+def test_picker_uses_qualified_engine_key():
+    from webapp.components.constructor_picker import _PICKER_JS
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is required")
+    subprocess.run([node, "-e", """
+const assert = require('node:assert/strict');
+const memo = fn => fn;
+const useState = () => ['', () => {}];
+const useMemo = fn => fn();
+const React = {createElement: (tag, props, ...children) => ({tag, props, children})};
+""" + _PICKER_JS + """
+let picked;
+const tree = ConstructorPicker({
+    options: [{id:'569268', key:'A320:569268', label:'569268: A321-200'}],
+    selected: ['A320:569268'], multiple: false,
+    onPick: (...args) => { picked = args; },
+});
+function find(node, tag) {
+    if (!node || typeof node !== 'object') return;
+    if (node.tag === tag) return node;
+    for (const child of (Array.isArray(node) ? node : node.children || [])) {
+        const found = find(child, tag);
+        if (found) return found;
+    }
+}
+const button = find(tree, 'button');
+assert.equal(button.props['aria-pressed'], true);
+button.props.onClick();
+assert.deepEqual(picked, ['A320:569268', true]);
+"""], check=True)

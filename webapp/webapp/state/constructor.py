@@ -17,6 +17,7 @@ from ..components.constructor_fig import (
     copy_series,
     empty_chart,
     update_time_ticks,
+    trace_x_values,
 )
 from ..data import flight_db
 from ..data.egt_params import DEFAULT_PARAMS
@@ -273,7 +274,9 @@ class ConstructorState(rx.State):
                 self.chart_figure = go.Figure(data=traces, layout=figure.layout)
                 if not self.is_computing:
                     self.has_chart = any(
-                        len(trace.x) for trace in figure.data if trace.name == "Raw"
+                        len(trace_x_values(trace))
+                        for trace in figure.data
+                        if trace.name == "Raw"
                     )
         except Exception as exc:
             async with self:
@@ -303,9 +306,10 @@ class ConstructorState(rx.State):
         if key != self.selected_engine:
             self.timeline_start = self.timeline_end = ""
         self.selected_engine = key
-        if family != self._catalog_family or not self.catalog:
-            self.catalog = self._catalogs[family]
-            self._catalog_family = family
+        # Re-publish the catalog even when revisiting the same family: a new
+        # browser mount starts with empty controls while server state can survive.
+        self.catalog = [dict(entry) for entry in self._catalogs[family]]
+        self._catalog_family = family
         available = {e["id"] for e in self.catalog}
         selected = [p for p in self.selected_params if p in available]
         self.selected_params = (
@@ -316,6 +320,10 @@ class ConstructorState(rx.State):
 
     @rx.event
     async def on_load(self):
+        # Browser refs disappear on reload/navigation; the server cache survives.
+        # Reuse computed rows, but resend their arrays to this new chart mount.
+        self._sent_params = []
+        self.has_chart = False
         try:
             # Reflex's query_parameters drops blank values (params=, start=).
             params = dict(parse_qsl(self.router.url.query, keep_blank_values=True))

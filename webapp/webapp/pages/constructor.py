@@ -84,9 +84,14 @@ def _controls():
             rx.flex(
                 rx.foreach(
                     State.selected_params,
-                    lambda pid: rx.badge(pid.split("@")[0], title=pid, color_scheme="blue"),
+                    lambda pid: rx.badge(
+                        pid.split("@")[0], title=pid, color_scheme="blue"
+                    ),
                 ),
-                direction="row", wrap="wrap", gap="4px", width="100%",
+                direction="row",
+                wrap="wrap",
+                gap="4px",
+                width="100%",
             ),
             ConstructorPicker.create(
                 options=State.catalog,
