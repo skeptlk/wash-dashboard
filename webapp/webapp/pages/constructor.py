@@ -71,18 +71,6 @@ def _controls():
         rx.vstack(
             rx.hstack(
                 rx.text("Parameters", size="2", weight="medium"),
-                rx.flex(
-                    rx.foreach(
-                        State.selected_params,
-                        lambda pid: rx.badge(
-                            pid.split("@")[0], title=pid, color_scheme="blue"
-                        ),
-                    ),
-                    wrap="wrap",
-                    gap="4px",
-                    flex="1",
-                    min_width="0",
-                ),
                 rx.spacer(),
                 rx.button(
                     "Reset",
@@ -92,6 +80,13 @@ def _controls():
                 ),
                 align="center",
                 width="100%",
+            ),
+            rx.flex(
+                rx.foreach(
+                    State.selected_params,
+                    lambda pid: rx.badge(pid.split("@")[0], title=pid, color_scheme="blue"),
+                ),
+                direction="row", wrap="wrap", gap="4px", width="100%",
             ),
             ConstructorPicker.create(
                 options=State.catalog,
