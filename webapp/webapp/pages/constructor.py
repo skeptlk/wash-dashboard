@@ -5,40 +5,8 @@ from plotly.io import templates
 
 from ..components.shell import page_shell
 from ..components.constructor_plotly import ConstructorPlotly
+from ..components.constructor_picker import ConstructorPicker
 from ..state.constructor import ConstructorState as State
-
-
-def _engine_row(engine):
-    return rx.box(
-        rx.text(engine["label"], size="1"),
-        on_click=State.select_engine(engine["key"]),
-        cursor="pointer",
-        padding="4px 6px",
-        border_radius="4px",
-        width="100%",
-        background_color=rx.cond(
-            State.selected_engine == engine["key"], "var(--accent-4)", "transparent"
-        ),
-        _hover={"background_color": "var(--gray-3)"},
-    )
-
-
-def _parameter_group(title, options):
-    return rx.vstack(
-        rx.text(title, size="1", weight="medium", color="var(--gray-10)"),
-        rx.foreach(
-            options,
-            lambda entry: rx.checkbox(
-                entry["name"],
-                checked=State.selected_params.contains(entry["id"]),
-                on_change=State.toggle_param(entry["id"]),
-                size="1",
-            ),
-        ),
-        spacing="1",
-        align="start",
-        width="100%",
-    )
 
 
 def _controls():
@@ -103,7 +71,18 @@ def _controls():
         rx.vstack(
             rx.hstack(
                 rx.text("Parameters", size="2", weight="medium"),
-                rx.badge(State.selected_params.length().to_string()),
+                rx.flex(
+                    rx.foreach(
+                        State.selected_params,
+                        lambda pid: rx.badge(
+                            pid.split("@")[0], title=pid, color_scheme="blue"
+                        ),
+                    ),
+                    wrap="wrap",
+                    gap="4px",
+                    flex="1",
+                    min_width="0",
+                ),
                 rx.spacer(),
                 rx.button(
                     "Reset",
@@ -114,45 +93,22 @@ def _controls():
                 align="center",
                 width="100%",
             ),
-            rx.input(
-                placeholder="Parameter name",
-                value=State.param_search,
-                on_change=State.set_param_search,
-                size="1",
-                width="100%",
-            ),
-            rx.scroll_area(
-                rx.vstack(
-                    _parameter_group("Takeoff", State.takeoff_params),
-                    _parameter_group("Cruise", State.cruise_params),
-                    spacing="3",
-                    align="stretch",
-                    width="100%",
-                ),
-                max_height="260px",
-                width="100%",
+            ConstructorPicker.create(
+                options=State.catalog,
+                selected=State.selected_params,
+                multiple=True,
+                on_pick=State.toggle_param,
             ),
             width="100%",
             spacing="2",
         ),
         rx.vstack(
             rx.text("Engine", size="2", weight="medium"),
-            rx.input(
-                placeholder="Engine or aircraft",
-                value=State.engine_search,
-                on_change=State.set_engine_search,
-                size="1",
-                width="100%",
-            ),
-            rx.scroll_area(
-                rx.vstack(
-                    rx.foreach(State.filtered_engines, _engine_row),
-                    spacing="1",
-                    align="stretch",
-                    width="100%",
-                ),
-                max_height="420px",
-                width="100%",
+            ConstructorPicker.create(
+                options=State.engines,
+                selected=rx.Var.create([State.selected_engine]),
+                multiple=False,
+                on_pick=lambda key, checked: State.select_engine(key),
             ),
             spacing="1",
             width="100%",

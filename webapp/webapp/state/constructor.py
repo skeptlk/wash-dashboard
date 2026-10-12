@@ -27,10 +27,8 @@ logger = logging.getLogger(__name__)
 class ConstructorState(rx.State):
     engines: list[dict[str, str]] = []
     selected_engine: str = ""
-    engine_search: str = ""
     catalog: list[dict[str, str]] = []
     selected_params: list[str] = []
-    param_search: str = ""
     start_date: str = ""
     end_date: str = ""
     smoothing_window: str = "26"
@@ -53,7 +51,9 @@ class ConstructorState(rx.State):
     _sent_params: list[str] = []
     _data_key: str = ""
     _loading_param: bool = False
+    _prepared_generation: int = -1
     _catalog_family: str = ""
+    _catalogs: dict[str, list[dict[str, str]]] = {}
     has_chart: bool = False
     is_computing: bool = False
     error: str = ""
@@ -61,27 +61,6 @@ class ConstructorState(rx.State):
     @rx.var
     def egt_indication_enabled(self) -> bool:
         return self.egt_indication_store == "true"
-
-    @rx.var
-    def filtered_engines(self) -> list[dict[str, str]]:
-        q = self.engine_search.strip().lower()
-        return [e for e in self.engines if q in e["label"].lower()]
-
-    @rx.var(cache=False)
-    def takeoff_params(self) -> list[dict[str, str]]:
-        return self._filtered_params("TAKEOFF")
-
-    @rx.var(cache=False)
-    def cruise_params(self) -> list[dict[str, str]]:
-        return self._filtered_params("CRUISE")
-
-    def _filtered_params(self, phase):
-        q = self.param_search.strip().lower()
-        return [
-            dict(e)
-            for e in self.catalog
-            if e["phase"] == phase and q in e["name"].lower()
-        ]
 
     @rx.var
     def chart_height(self) -> str:
@@ -115,146 +94,207 @@ class ConstructorState(rx.State):
                     )
         if not self.has_chart:
             self._sent_params = []
-        self.is_computing = False
-        if not self.selected_engine or not self.selected_params:
-            self.chart_generation += 1
-            self.has_chart = False
-            self.loaded_params = 0
-            self._sent_params = []
-            yield self._sync_url()
-            return
-        self.is_computing = True
-        # Keep the previous figure and its dimensions beneath the loading overlay.
-        yield self._sync_url()
         self.chart_generation += 1
+        self._loading_param = False
+        self.loaded_params = 0
+        self.is_computing = bool(self.selected_engine and self.selected_params)
+        if not self.is_computing:
+            self.has_chart = False
+            self._sent_params = []
+        yield self._sync_url()
+        if self.is_computing:
+            yield ConstructorState.prepare_chart(self.chart_generation)
+
+    @rx.event(background=True)
+    async def prepare_chart(self, generation: int):
+        async with self:
+            if generation != self.chart_generation or not self.is_computing:
+                return
+            engine = self.selected_engine
+            family, eid = engine.split(":", 1)
+            start, end = self.start_date, self.end_date
+            catalog = list(self.catalog)
+            selected = list(self.selected_params)
+            option = dict(next(e for e in self.engines if e["key"] == engine))
+            enabled = self.egt_indication_enabled
+            prediction_key = json.dumps([engine, start, end])
+            predictions = list(self._predictions)
+            needs_predictions = enabled and prediction_key != self._predictions_key
+            data_generation = self.chart_data_generation
         try:
-            family, eid = self.selected_engine.split(":", 1)
-            for value in (self.start_date, self.end_date):
+            for value in (start, end):
                 if value:
                     date.fromisoformat(value)
-            prediction_key = json.dumps(
-                [self.selected_engine, self.start_date, self.end_date]
-            )
-            if self.egt_indication_enabled and prediction_key != self._predictions_key:
-                self._predictions = await asyncio.to_thread(
+            if needs_predictions:
+                predictions = await asyncio.to_thread(
                     flight_db.read_egt_predictions,
                     family,
                     eid,
-                    self.start_date,
-                    self.end_date,
-                    catalog=list(self.catalog),
+                    start,
+                    end,
+                    catalog=catalog,
                 )
-                self._predictions_key = prediction_key
-            catalog = {entry["id"]: entry for entry in self.catalog}
-            self._chart_figure = await asyncio.to_thread(
+            # Stop the old pipeline before doing further work or publishing it.
+            async with self:
+                if generation != self.chart_generation:
+                    return
+            entries = {entry["id"]: entry for entry in catalog}
+            figure = await asyncio.to_thread(
                 empty_chart,
                 family,
                 eid,
-                [catalog[pid] for pid in self.selected_params],
-                next(e for e in self.engines if e["key"] == self.selected_engine),
+                [entries[pid] for pid in selected],
+                option,
             )
-            self._chart_figure.update_layout(uirevision=self.chart_data_generation)
-            self._figure_params = list(self.selected_params)
-            self.loaded_params = 0
-            self.chart_rows = len(self.selected_params)
-            await self._load_parameter()
-        except (ValueError, FileNotFoundError) as exc:
-            self.error = str(exc)
-            self.has_chart = False
-        except Exception:
-            logger.exception("Constructor chart failed")
-            self.error = "Could not read the flight database. Check the server logs."
-            self.has_chart = False
-        if self.error:
-            self.is_computing = False
-
-    async def _load_parameter(self):
-        """Reuse cached rows and load at most one new parameter per browser ack."""
-        family, eid = self.selected_engine.split(":", 1)
-        offset = len(self._chart_figure.data)
-        while self.loaded_params < len(self.selected_params):
-            pid = self.selected_params[self.loaded_params]
-            cached = pid in self._series_cache
-            if not cached:
-                series, events = await asyncio.to_thread(
-                    flight_db.read_trends,
-                    family,
-                    eid,
-                    [pid],
-                    self.start_date,
-                    self.end_date,
-                    int(self.smoothing_window),
-                    catalog=list(self.catalog),
+            figure.update_layout(uirevision=data_generation)
+            async with self:
+                if generation != self.chart_generation:
+                    return
+                if needs_predictions:
+                    self._predictions = predictions
+                    self._predictions_key = prediction_key
+                self._chart_figure = figure
+                self._prepared_generation = generation
+                self._figure_params = selected
+                self.chart_rows = len(selected)
+            yield ConstructorState.load_next_parameter(generation, 0)
+        except Exception as exc:
+            async with self:
+                if generation != self.chart_generation:
+                    return
+                logger.exception("Constructor chart failed")
+                self.error = (
+                    str(exc)
+                    if isinstance(exc, (ValueError, FileNotFoundError))
+                    else ("Could not read the flight database. Check the server logs.")
                 )
-                entry, frame = series[0]
-                source = empty_chart(family, eid, [entry])
-                await asyncio.to_thread(
-                    add_series,
-                    source,
-                    entry,
-                    frame,
-                    events,
-                    1,
-                    int(self.smoothing_window),
-                )
-                if self.egt_indication_enabled:
-                    add_predictions(source, entry, self._predictions)
-                for index, trace in enumerate(source.data):
-                    trace.meta = f"{pid}:{index}"
-                self._series_cache[pid] = source
-            row = self.loaded_params + 1
-            copy_series(self._chart_figure, self._series_cache[pid], row)
-            self._chart_figure.update_yaxes(
-                uirevision=f"{self.chart_data_generation}:{pid}",
-                row=row,
-                col=1,
-                secondary_y=False,
-            )
-            self.loaded_params += 1
-            if not cached:
-                break
-        self.is_computing = self.loaded_params < len(self.selected_params)
-        # Empty rows must still mount Plotly so its acknowledgement advances loading.
-        self.has_chart = True
-        self._apply_timeline()
-        self.chart_offset = offset
-        traces = []
-        for trace in self._chart_figure.data[offset:]:
-            payload = trace.to_plotly_json()
-            pid = trace.meta.rsplit(":", 1)[0]
-            if pid in self._sent_params:
-                for field in ("x", "y", "customdata"):
-                    payload.pop(field, None)
-            traces.append(payload)
-        self._sent_params = list(
-            dict.fromkeys(
-                [*self._sent_params, *self.selected_params[: self.loaded_params]]
-            )
-        )
-        self.chart_figure = go.Figure(data=traces, layout=self._chart_figure.layout)
-        if not self.is_computing:
-            self.has_chart = any(
-                len(trace.x) for trace in self._chart_figure.data if trace.name == "Raw"
-            )
+                self.has_chart = False
+                self.is_computing = False
 
-    @rx.event
+    @rx.event(background=True)
     async def load_next_parameter(self, generation: int, completed: int):
-        if (
-            generation != self.chart_generation
-            or completed != self.loaded_params
-            or not self.is_computing
-            or self._loading_param
-        ):
-            return
-        self._loading_param = True
+        async with self:
+            if (
+                generation != self.chart_generation
+                or generation != self._prepared_generation
+                or completed != self.loaded_params
+                or not self.is_computing
+                or self._loading_param
+            ):
+                return
+            self._loading_param = True
+            family, eid = self.selected_engine.split(":", 1)
+            selected = list(self.selected_params)
+            catalog = list(self.catalog)
+            start, end = self.start_date, self.end_date
+            window = int(self.smoothing_window)
+            enabled = self.egt_indication_enabled
+            predictions = list(self._predictions)
+            cache = dict(self._series_cache)
+            figure = self._chart_figure
+            viewport = {
+                name: (figure.layout[name].range, figure.layout[name].autorange)
+                for name in figure.layout
+                if re.fullmatch(r"yaxis\d*", name)
+            }
+            data_generation = self.chart_data_generation
+            sent = list(self._sent_params)
         try:
-            await self._load_parameter()
-        except Exception:
-            logger.exception("Constructor parameter load failed")
-            self.error = "Could not load the remaining parameters. Change the selection to retry."
-            self.is_computing = False
+            # Only the local figure is mutated while the state lock is released.
+            figure = await asyncio.to_thread(go.Figure, figure)
+            offset = len(figure.data)
+            loaded = completed
+            while loaded < len(selected):
+                pid = selected[loaded]
+                cached = pid in cache
+                if not cached:
+                    series, events = await asyncio.to_thread(
+                        flight_db.read_trends,
+                        family,
+                        eid,
+                        [pid],
+                        start,
+                        end,
+                        window,
+                        catalog=catalog,
+                    )
+                    async with self:
+                        if generation != self.chart_generation:
+                            return
+                    entry, frame = series[0]
+
+                    def build_source():
+                        source = empty_chart(family, eid, [entry])
+                        add_series(source, entry, frame, events, 1, window)
+                        if enabled:
+                            add_predictions(source, entry, predictions)
+                        for index, trace in enumerate(source.data):
+                            trace.meta = f"{pid}:{index}"
+                        return source
+
+                    cache[pid] = await asyncio.to_thread(build_source)
+                row = loaded + 1
+                await asyncio.to_thread(copy_series, figure, cache[pid], row)
+                figure.update_yaxes(
+                    uirevision=f"{data_generation}:{pid}",
+                    row=row,
+                    col=1,
+                    secondary_y=False,
+                )
+                loaded += 1
+                if not cached:
+                    break
+            async with self:
+                if generation != self.chart_generation:
+                    return
+                for axis_name in self._chart_figure.layout:
+                    if re.fullmatch(r"yaxis\d*", axis_name):
+                        axis = self._chart_figure.layout[axis_name]
+                        if (axis.range, axis.autorange) != viewport.get(axis_name):
+                            figure.layout[axis_name].update(
+                                range=axis.range, autorange=axis.autorange
+                            )
+                self._chart_figure = figure
+                self._series_cache = cache
+                self.loaded_params = loaded
+                self.is_computing = loaded < len(selected)
+                self.has_chart = True
+                self._apply_timeline()
+                self.chart_offset = offset
+                traces = []
+                for trace in figure.data[offset:]:
+                    payload = trace.to_plotly_json()
+                    pid = trace.meta.rsplit(":", 1)[0]
+                    if pid in sent:
+                        for field in ("x", "y", "customdata"):
+                            payload.pop(field, None)
+                    traces.append(payload)
+                self._sent_params = list(dict.fromkeys([*sent, *selected[:loaded]]))
+                self.chart_figure = go.Figure(data=traces, layout=figure.layout)
+                if not self.is_computing:
+                    self.has_chart = any(
+                        len(trace.x) for trace in figure.data if trace.name == "Raw"
+                    )
+        except Exception as exc:
+            async with self:
+                if generation != self.chart_generation:
+                    return
+                logger.exception("Constructor parameter load failed")
+                self.error = (
+                    str(exc)
+                    if completed == 0
+                    and isinstance(exc, (ValueError, FileNotFoundError))
+                    else (
+                        "Could not load the remaining parameters. Change the selection to retry."
+                    )
+                )
+                self.is_computing = False
+                if completed == 0:
+                    self.has_chart = False
         finally:
-            self._loading_param = False
+            async with self:
+                if generation == self.chart_generation:
+                    self._loading_param = False
 
     async def _select(self, key):
         if not any(e["key"] == key for e in self.engines):
@@ -264,7 +304,7 @@ class ConstructorState(rx.State):
             self.timeline_start = self.timeline_end = ""
         self.selected_engine = key
         if family != self._catalog_family or not self.catalog:
-            self.catalog = await asyncio.to_thread(flight_db.parameter_catalog, family)
+            self.catalog = self._catalogs[family]
             self._catalog_family = family
         available = {e["id"] for e in self.catalog}
         selected = [p for p in self.selected_params if p in available]
@@ -280,6 +320,11 @@ class ConstructorState(rx.State):
             # Reflex's query_parameters drops blank values (params=, start=).
             params = dict(parse_qsl(self.router.url.query, keep_blank_values=True))
             self.engines = await asyncio.to_thread(flight_db.engine_options)
+            families = {e["key"].split(":", 1)[0] for e in self.engines}
+            self._catalogs = {
+                family: await asyncio.to_thread(flight_db.parameter_catalog, family)
+                for family in families
+            }
             if self.engines:
                 key = params.get("engine", self.selected_engine)
                 if not any(e["key"] == key for e in self.engines):
@@ -364,14 +409,6 @@ class ConstructorState(rx.State):
         self.smoothing_window = value
         async for update in self._refresh():
             yield update
-
-    @rx.event
-    def set_engine_search(self, value: str):
-        self.engine_search = value
-
-    @rx.event
-    def set_param_search(self, value: str):
-        self.param_search = value
 
     @staticmethod
     def _valid_date(value: str) -> bool:

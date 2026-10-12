@@ -13,6 +13,21 @@ from webapp.data import flight_db
 from webapp.data.migrate_flights import migrate
 
 
+async def _settle(state, updates):
+    """Dispatch scheduled chart events, as Reflex does after a control event."""
+    from webapp.state.constructor import ConstructorState
+
+    events = [item async for item in updates]
+    for event in events:
+        if event.handler == ConstructorState.prepare_chart:
+            children = [item async for item in ConstructorState.prepare_chart.fn(
+                state, state.chart_generation
+            )]
+            if children:
+                await ConstructorState.load_next_parameter.fn(state, state.chart_generation, 0)
+    return events
+
+
 @pytest.fixture
 def sources(tmp_path):
     history = tmp_path / "onwing.csv"
@@ -307,21 +322,21 @@ def test_constructor_switches_families_and_shows_errors(database, monkeypatch):
 
     async def run():
         state = ConstructorState(_reflex_internal_init=True)
-        _ = [item async for item in state.on_load()]
+        _ = await _settle(state, state.on_load())
         assert state.has_chart and not state.error
-        _ = [item async for item in state.select_engine("E170:101")]
+        _ = await _settle(state, state.select_engine("E170:101"))
         assert "EMB_ONLY@TAKEOFF" in {e["id"] for e in state.catalog}
-        _ = [item async for item in state.toggle_param("EMB_ONLY@TAKEOFF", True)]
+        _ = await _settle(state, state.toggle_param("EMB_ONLY@TAKEOFF", True))
         assert "EMB_ONLY@TAKEOFF" in state.selected_params
-        _ = [item async for item in state.select_engine("B737:101")]
+        _ = await _settle(state, state.select_engine("B737:101"))
         assert "EMB_ONLY@TAKEOFF" not in state.selected_params
-        _ = [item async for item in state.set_start_date("2025-01-01")]
-        _ = [item async for item in state.set_end_date("2020-01-01")]
+        _ = await _settle(state, state.set_start_date("2025-01-01"))
+        _ = await _settle(state, state.set_end_date("2020-01-01"))
         assert not state.has_chart and "Start date" in state.error
         monkeypatch.setenv(
             "FLIGHT_DATABASE_PATH", str(Path(database).parent / "missing.duckdb")
         )
-        _ = [item async for item in state.on_load()]
+        _ = await _settle(state, state.on_load())
         assert not state.has_chart and "migration" in state.error
 
     asyncio.run(run())
@@ -375,7 +390,7 @@ def test_constructor_url_roundtrip_and_zoom(database, monkeypatch):
 
     async def run():
         state = state_at("http://localhost/constructor?" + urlencode(query))
-        _ = [item async for item in state.on_load()]
+        _ = await _settle(state, state.on_load())
         assert not state.error and state.has_chart
         assert state.selected_engine == query["engine"]
         assert state.selected_params == query["params"].split(",")
@@ -390,7 +405,7 @@ def test_constructor_url_roundtrip_and_zoom(database, monkeypatch):
         }
         assert sync_url(state, "http://localhost/egt") == "http://localhost/egt"
         restored = state_at(url)
-        _ = [item async for item in restored.on_load()]
+        _ = await _settle(restored, restored.on_load())
         assert restored.selected_params == state.selected_params
         assert restored.timeline_start == state.timeline_start
         state.on_plot_relayout({"xaxis2.range": ["2025-01-02", "2025-01-03"]})
@@ -401,16 +416,16 @@ def test_constructor_url_roundtrip_and_zoom(database, monkeypatch):
         state.on_plot_relayout({"xaxis.autorange": True})
         assert not state.timeline_start and state.chart_figure.layout.xaxis.autorange
         assert "x_start" not in parse_qs(urlsplit(sync_url(state, url)).query)
-        _ = [item async for item in state.toggle_param("DEGT@CRUISE", False)]
-        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", False)]
-        _ = [item async for item in state.set_start_date("")]
-        _ = [item async for item in state.set_end_date("")]
+        _ = await _settle(state, state.toggle_param("DEGT@CRUISE", False))
+        _ = await _settle(state, state.toggle_param("EGTHDM@TAKEOFF", False))
+        _ = await _settle(state, state.set_start_date(""))
+        _ = await _settle(state, state.set_end_date(""))
         empty_url = sync_url(state, url)
         assert parse_qs(urlsplit(empty_url).query, keep_blank_values=True)[
             "params"
         ] == [""]
         restored = state_at(empty_url)
-        _ = [item async for item in restored.on_load()]
+        _ = await _settle(restored, restored.on_load())
         assert restored.selected_params == [] and not restored.has_chart
         assert restored.start_date == restored.end_date == ""
 
@@ -433,7 +448,7 @@ def test_constructor_invalid_url_values_and_reset_zoom(database, monkeypatch):
                 "&params=EGTHDM%40TAKEOFF,unknown,EGTHDM%40TAKEOFF&smoothing=0&x_start=bad&x_end=bad"
             )
         )
-        _ = [item async for item in state.on_load()]
+        _ = await _settle(state, state.on_load())
         assert not state.error and state.has_chart
         assert state.selected_engine in {e["key"] for e in state.engines}
         assert state.selected_params == ["EGTHDM@TAKEOFF"]
@@ -441,11 +456,11 @@ def test_constructor_invalid_url_values_and_reset_zoom(database, monkeypatch):
         state.on_plot_relayout(
             {"xaxis.range[0]": "2025-01-02", "xaxis.range[1]": "2025-01-03"}
         )
-        _ = [item async for item in state.set_smoothing_window("3")]
+        _ = await _settle(state, state.set_smoothing_window("3"))
         assert state.timeline_start == "2025-01-02"
-        _ = [item async for item in state.set_start_date("2025-01-01")]
+        _ = await _settle(state, state.set_start_date("2025-01-01"))
         assert not state.timeline_start and state.chart_figure.layout.xaxis.autorange
-        _ = [item async for item in state.set_end_date("")]
+        _ = await _settle(state, state.set_end_date(""))
         assert state.end_date == ""
 
     asyncio.run(run())
@@ -464,7 +479,7 @@ def test_constructor_loading_keeps_previous_chart(database, monkeypatch, handler
 
     async def run():
         state = ConstructorState(_reflex_internal_init=True)
-        _ = [item async for item in state.on_load()]
+        _ = await _settle(state, state.on_load())
         previous = state.chart_figure.to_json()
         previous_height = state.chart_height
         updates = getattr(state, handler)(*args)
@@ -472,7 +487,7 @@ def test_constructor_loading_keeps_previous_chart(database, monkeypatch, handler
         assert state.is_computing and state.has_chart
         assert state.chart_figure.to_json() == previous
         assert state.chart_height == previous_height
-        _ = [item async for item in updates]
+        _ = await _settle(state, updates)
         assert not state.is_computing and state.has_chart
 
     asyncio.run(run())
@@ -656,17 +671,17 @@ def test_progressive_parameters_are_acknowledged_and_not_retransmitted(
     async def run():
         state = ConstructorState(_reflex_internal_init=True)
         state.selected_engine = "B737:101"
-        _ = [item async for item in state.on_load()]
+        _ = await _settle(state, state.on_load())
         assert state.selected_params == ["EGTHDM@TAKEOFF", "DEGT@CRUISE"]
         assert calls == [["EGTHDM@TAKEOFF"]]
         assert state.has_chart and state.is_computing
         assert state.loaded_params == 1 and state.chart_offset == 0
         generation = state.chart_generation
         first = state.chart_figure.to_json()
-        await state.load_next_parameter(generation - 1, 1)
-        await state.load_next_parameter(generation, 0)
+        await ConstructorState.load_next_parameter.fn(state, generation - 1, 1)
+        await ConstructorState.load_next_parameter.fn(state, generation, 0)
         assert state.chart_figure.to_json() == first
-        await state.load_next_parameter(generation, 1)
+        await ConstructorState.load_next_parameter.fn(state, generation, 1)
         assert calls == [["EGTHDM@TAKEOFF"], ["DEGT@CRUISE"]]
         assert state.loaded_params == 2 and not state.is_computing
         assert state.chart_offset == 4 and len(state.chart_figure.data) == 4
@@ -695,7 +710,7 @@ def test_progressive_parameters_are_acknowledged_and_not_retransmitted(
         assert json.loads(state._chart_figure.to_json()) == json.loads(
             expected.to_json()
         )
-        await state.load_next_parameter(generation, 1)
+        await ConstructorState.load_next_parameter.fn(state, generation, 1)
         assert len(calls) == 2
         state.on_plot_relayout({"xaxis.range": ["2025-01-02", "2025-01-03"]})
         assert len(state.chart_figure.data) == 0 and state.chart_offset == 8
@@ -703,8 +718,8 @@ def test_progressive_parameters_are_acknowledged_and_not_retransmitted(
             "2025-01-02",
             "2025-01-03",
         ]
-        _ = [item async for item in state.select_engine("B737:102")]
-        await state.load_next_parameter(generation, 2)
+        _ = await _settle(state, state.select_engine("B737:102"))
+        await ConstructorState.load_next_parameter.fn(state, generation, 2)
         assert state.loaded_params == 1
 
     asyncio.run(run())
@@ -721,22 +736,22 @@ def test_progressive_empty_first_row_and_later_failure(database, monkeypatch):
     async def run():
         state = ConstructorState(_reflex_internal_init=True)
         state.selected_engine = "B737:101"
-        _ = [item async for item in state.on_load()]
+        _ = await _settle(state, state.on_load())
         assert state.has_chart and state.is_computing
         assert len(state.chart_figure.data[0].x) == 0
-        await state.load_next_parameter(state.chart_generation, 1)
+        await ConstructorState.load_next_parameter.fn(state, state.chart_generation, 1)
         assert state.has_chart and not state.is_computing
-        _ = [item async for item in state.set_end_date("2025-01-03")]
-        _ = [item async for item in state.set_start_date("2026-01-01")]
+        _ = await _settle(state, state.set_end_date("2025-01-03"))
+        _ = await _settle(state, state.set_start_date("2026-01-01"))
         assert state.error  # invalid date order stops loading
         state.start_date = "2025-01-01"
-        _ = [item async for item in state._refresh()]
+        _ = await _settle(state, state._refresh())
 
         def fail(*args, **kwargs):
             raise RuntimeError("transport lost")
 
         monkeypatch.setattr(flight_db, "read_trends", fail)
-        await state.load_next_parameter(state.chart_generation, 1)
+        await ConstructorState.load_next_parameter.fn(state, state.chart_generation, 1)
         assert not state.is_computing and "remaining parameters" in state.error
 
     asyncio.run(run())
@@ -758,13 +773,13 @@ def test_constructor_reuses_catalog_for_same_family(database, monkeypatch):
     async def run():
         state = ConstructorState(_reflex_internal_init=True)
         state.selected_engine = "B737:101"
-        _ = [item async for item in state.on_load()]
-        await state.load_next_parameter(state.chart_generation, 1)
-        _ = [item async for item in state.select_engine("B737:102")]
-        await state.load_next_parameter(state.chart_generation, 1)
-        assert calls == ["B737"]
-        _ = [item async for item in state.select_engine("E170:101")]
-        assert calls == ["B737", "E170"]
+        _ = await _settle(state, state.on_load())
+        await ConstructorState.load_next_parameter.fn(state, state.chart_generation, 1)
+        _ = await _settle(state, state.select_engine("B737:102"))
+        await ConstructorState.load_next_parameter.fn(state, state.chart_generation, 1)
+        assert sorted(calls) == ["A320", "B737", "E170"]
+        _ = await _settle(state, state.select_engine("E170:101"))
+        assert sorted(calls) == ["A320", "B737", "E170"]
 
     asyncio.run(run())
 
@@ -779,7 +794,7 @@ def test_sql_string_values_cannot_change_query(database):
     assert series[0][1].empty and events == []
 
 
-def test_parameter_selector_loads_filters_and_switches_families(database, monkeypatch):
+def test_parameter_selector_loads_and_switches_families(database, monkeypatch):
     from webapp.state.constructor import ConstructorState
 
     monkeypatch.setenv("FLIGHT_DATABASE_PATH", str(database))
@@ -794,23 +809,17 @@ def test_parameter_selector_loads_filters_and_switches_families(database, monkey
     async def run():
         state = ConstructorState(_reflex_internal_init=True)
         # Hydration initially renders empty selectors before on_load runs.
-        assert state.takeoff_params == state.cruise_params == []
+        assert state.catalog == []
         state.selected_engine = "B737:101"
-        _ = [item async for item in state.on_load()]
+        _ = await _settle(state, state.on_load())
         delta = state.get_delta()[state.get_full_name()]
-        assert {p["name"] for p in delta["takeoff_params_rx_state_"]} == {
-            "EGTHDM",
-            "VISIBLE_PIP_VALUE",
+        assert {p["name"] for p in delta["catalog_rx_state_"]} == {
+            "EGTHDM", "VISIBLE_PIP_VALUE", "DEGT",
         }
-        assert {p["name"] for p in delta["cruise_params_rx_state_"]} == {"DEGT"}
         assert all(not p["name"].lower().startswith("pip_") for p in state.catalog)
-        state.set_param_search("egt")
-        assert [p["name"] for p in state.takeoff_params] == ["EGTHDM"]
-        assert [p["name"] for p in state.cruise_params] == ["DEGT"]
-        state.set_param_search("")
-        _ = [item async for item in state.select_engine("E170:101")]
-        assert {p["name"] for p in state.takeoff_params} == {"EGTHDM", "EMB_ONLY"}
-        assert state.cruise_params == []
+        _ = await _settle(state, state.select_engine("E170:101"))
+        assert {p["name"] for p in state.catalog} == {"EGTHDM", "EMB_ONLY"}
+        assert all(p["phase"] == "TAKEOFF" for p in state.catalog)
 
     asyncio.run(run())
 
@@ -833,7 +842,7 @@ def test_constructor_zoom_keeps_dates_data_and_independent_y_ranges(
     async def run():
         state = ConstructorState(_reflex_internal_init=True)
         state.selected_engine = "B737:101"
-        _ = [item async for item in state.on_load()]
+        _ = await _settle(state, state.on_load())
         dates = state.start_date, state.end_date
         generation = state.chart_generation
         state.on_plot_relayout(
@@ -854,7 +863,7 @@ def test_constructor_zoom_keeps_dates_data_and_independent_y_ranges(
         for axis in (state.chart_figure.layout.xaxis, state.chart_figure.layout.xaxis2):
             assert axis.range == ("2025-01-02", "2025-01-03")
         # A parameter already being loaded retains the viewport on arrival.
-        await state.load_next_parameter(generation, 1)
+        await ConstructorState.load_next_parameter.fn(state, generation, 1)
         assert state.chart_figure.layout.yaxis.range == (15, 25)
         assert len(calls) == 2
         state.on_plot_relayout({"yaxis3.range": [12, 18]})
@@ -914,18 +923,18 @@ def test_empty_dates_follow_each_engine_full_history_and_reset_zoom(
     async def run():
         state = ConstructorState(_reflex_internal_init=True)
         state.selected_engine = "B737:101"
-        _ = [item async for item in state.on_load()]
+        _ = await _settle(state, state.on_load())
         assert state.start_date == state.end_date == ""
         assert len(state.chart_figure.data[0].x) == 3
         state.on_plot_relayout({"xaxis.range": ["2025-01-02", "2025-01-03"]})
-        _ = [item async for item in state.select_engine("B737:102")]
+        _ = await _settle(state, state.select_engine("B737:102"))
         assert state.start_date == state.end_date == ""
         assert state.timeline_start == state.timeline_end == ""
         assert state.chart_figure.layout.xaxis.autorange
         assert state.has_chart and len(state.chart_figure.data[0].x) == 1
         assert pd.to_datetime(state.chart_figure.data[0].x[0], unit="ms").year == 2029
-        _ = [item async for item in state.set_start_date("2029-01-01")]
-        _ = [item async for item in state.select_engine("B737:101")]
+        _ = await _settle(state, state.set_start_date("2029-01-01"))
+        _ = await _settle(state, state.select_engine("B737:101"))
         assert state.start_date == "2029-01-01" and state.end_date == ""
 
     asyncio.run(run())
@@ -984,11 +993,11 @@ def test_parameter_changes_reuse_series_and_preserve_zoom(database, monkeypatch)
     async def run():
         state = ConstructorState(_reflex_internal_init=True)
         state.selected_engine = "E170:101"
-        _ = [item async for item in state.on_load()]
+        _ = await _settle(state, state.on_load())
         revision = state.chart_data_generation
         initial = state._chart_figure.to_json()
         # Checking an already selected parameter is a no-op.
-        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", True)]
+        _ = await _settle(state, state.toggle_param("EGTHDM@TAKEOFF", True))
         assert state._chart_figure.to_json() == initial and len(calls) == 1
         state.on_plot_relayout(
             {
@@ -998,8 +1007,8 @@ def test_parameter_changes_reuse_series_and_preserve_zoom(database, monkeypatch)
         )
         updates = state.toggle_param("EMB_ONLY@TAKEOFF", True)
         await anext(updates)
-        assert state.has_chart and state.loaded_params == 1  # no full-page overlay
-        _ = [item async for item in updates]
+        assert state.has_chart and state.loaded_params == 0  # old chart stays visible
+        _ = await _settle(state, updates)
         assert [call[1] for call in calls] == [["EGTHDM@TAKEOFF"], ["EMB_ONLY@TAKEOFF"]]
         assert state.chart_data_generation == revision
         assert state.chart_figure.layout.yaxis.range == (15, 25)
@@ -1009,7 +1018,7 @@ def test_parameter_changes_reuse_series_and_preserve_zoom(database, monkeypatch)
         assert wire[0]["meta"] == "EGTHDM@TAKEOFF:0"
         assert "x" in wire[4] and "y" in wire[4]
         state.on_plot_relayout({"yaxis3.range": [1.5, 2.5]})
-        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", False)]
+        _ = await _settle(state, state.toggle_param("EGTHDM@TAKEOFF", False))
         assert len(calls) == 2 and not state.is_computing
         assert state.chart_figure.layout.yaxis.range == (1.5, 2.5)
         assert state.chart_figure.data[0].xaxis == "x"
@@ -1017,25 +1026,25 @@ def test_parameter_changes_reuse_series_and_preserve_zoom(database, monkeypatch)
         assert all(
             "x" not in t and "y" not in t for t in serialize(state.chart_figure)["data"]
         )
-        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", True)]
+        _ = await _settle(state, state.toggle_param("EGTHDM@TAKEOFF", True))
         assert len(calls) == 2
         assert state.chart_figure.layout.yaxis.range == (1.5, 2.5)
         assert state.chart_figure.layout.yaxis3.range == (15, 25)
         # Reset can reorder existing parameters without querying them again.
-        _ = [item async for item in state.reset_params()]
+        _ = await _settle(state, state.reset_params())
         assert len(calls) == 2 and state.chart_figure.layout.yaxis.range == (15, 25)
-        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", False)]
+        _ = await _settle(state, state.toggle_param("EGTHDM@TAKEOFF", False))
         assert not state.has_chart
-        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", True)]
+        _ = await _settle(state, state.toggle_param("EGTHDM@TAKEOFF", True))
         assert len(calls) == 2 and state.has_chart
         # An unmounted chart needs arrays again, though no SQL reload is needed.
         assert "x" in serialize(state.chart_figure)["data"][0]
-        _ = [item async for item in state.set_smoothing_window("3")]
+        _ = await _settle(state, state.set_smoothing_window("3"))
         assert len(calls) == 3 and state.chart_data_generation != revision
-        _ = [item async for item in state.select_engine("E170:102")]
+        _ = await _settle(state, state.select_engine("E170:102"))
         assert calls[-1][0] == "102" and len(calls) == 4
         assert state._chart_figure.data[0].y.tolist() == [999.0]
-        _ = [item async for item in state.set_start_date("2025-01-03")]
+        _ = await _settle(state, state.set_start_date("2025-01-03"))
         assert len(calls) == 5
 
     asyncio.run(run())
@@ -1094,33 +1103,98 @@ def test_constructor_prediction_toggle_and_cache(database, monkeypatch):
 
     async def run():
         state = ConstructorState(_reflex_internal_init=True)
-        _ = [item async for item in state.on_load()]
+        _ = await _settle(state, state.on_load())
         assert not calls
         # Restored LocalStorage value is used by on_load, just like a toggle.
         state.egt_indication_store = "true"
-        _ = [item async for item in state.on_load()]
+        _ = await _settle(state, state.on_load())
         assert len(calls) == 1
         prediction = next(t for t in state._chart_figure.data if t.name == "EGT Indication")
         assert prediction.yaxis == "y" and list(prediction.y) == [12.5]
         generation = state.chart_data_generation
-        _ = [item async for item in state.set_smoothing_window("10")]
+        _ = await _settle(state, state.set_smoothing_window("10"))
         assert len(calls) == 1  # Chart smoothing never changes the model.
-        _ = [item async for item in state.set_egt_indication(False)]
+        _ = await _settle(state, state.set_egt_indication(False))
         assert state.egt_indication_store == "false"
         assert state.chart_data_generation > generation
         assert not any(t.name == "EGT Indication" for t in state._chart_figure.data)
-        _ = [item async for item in state.set_egt_indication(True)]
+        _ = await _settle(state, state.set_egt_indication(True))
         assert len(calls) == 1
-        _ = [item async for item in state.select_engine("B737:102")]
+        _ = await _settle(state, state.select_engine("B737:102"))
         assert calls[-1][:2] == ("B737", "102")
-        _ = [item async for item in state.set_start_date("2025-01-02")]
+        _ = await _settle(state, state.set_start_date("2025-01-02"))
         assert calls[-1][2] == "2025-01-02"
-        _ = [item async for item in state.toggle_param("DEGT@CRUISE", True)]
-        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", False)]
+        _ = await _settle(state, state.toggle_param("DEGT@CRUISE", True))
+        _ = await _settle(state, state.toggle_param("EGTHDM@TAKEOFF", False))
         assert not any(t.name == "EGT Indication" for t in state._chart_figure.data)
-        _ = [item async for item in state.toggle_param("EGTHDM@TAKEOFF", True)]
+        _ = await _settle(state, state.toggle_param("EGTHDM@TAKEOFF", True))
         predictions = [t for t in state._chart_figure.data if t.name == "EGT Indication"]
         assert len(predictions) == 1
         assert predictions[0].yaxis == "y3" and predictions[0].showlegend
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fail_old", [False, True])
+@pytest.mark.parametrize("stage", ["first", "next", "predictions"])
+def test_constructor_switches_before_old_request_finishes(database, monkeypatch, fail_old, stage):
+    """A new engine and parameter choice completes before a blocked old read."""
+    import threading
+    from webapp.state.constructor import ConstructorState
+
+    monkeypatch.setenv("FLIGHT_DATABASE_PATH", str(database))
+    started, release = threading.Event(), threading.Event()
+    original = flight_db.read_trends
+
+    def wait_for_release():
+        started.set()
+        assert release.wait(10)
+        if fail_old:
+            raise RuntimeError("obsolete request failed")
+
+    def read(family, eid, params, *args, **kwargs):
+        if eid == "101" and (
+            stage == "first" or (stage == "next" and params == ["DEGT@CRUISE"])
+        ):
+            wait_for_release()
+        return original(family, eid, params, *args, **kwargs)
+
+    def predictions(family, eid, *args, **kwargs):
+        if eid == "101":
+            wait_for_release()
+        return []
+
+    monkeypatch.setattr(flight_db, "read_trends", read)
+    monkeypatch.setattr(flight_db, "read_egt_predictions", predictions)
+
+    async def run():
+        state = ConstructorState(_reflex_internal_init=True)
+        state.selected_engine = "B737:101"
+        state.egt_indication_store = "true" if stage == "predictions" else "false"
+        if stage == "next":
+            await _settle(state, state.on_load())
+            old = asyncio.create_task(ConstructorState.load_next_parameter.fn(
+                state, state.chart_generation, 1
+            ))
+        else:
+            old = asyncio.create_task(_settle(state, state.on_load()))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            async with asyncio.timeout(3):
+                await _settle(state, state.select_engine("E170:102"))
+                await _settle(state, state.toggle_param("EMB_ONLY@TAKEOFF", True))
+            assert not old.done()
+            assert state.selected_engine == "E170:102"
+            assert state.selected_params == ["EGTHDM@TAKEOFF", "EMB_ONLY@TAKEOFF"]
+            assert state.has_chart and not state.is_computing
+            assert not state.error
+            latest = state._chart_figure.to_json()
+            generation = state.chart_generation
+        finally:
+            release.set()
+            await asyncio.wait_for(old, 5)
+        assert state.chart_generation == generation
+        assert state._chart_figure.to_json() == latest
+        assert not state.error and not state._loading_param
 
     asyncio.run(run())
