@@ -53,7 +53,7 @@ def empty_chart(aircraft_type, engine_id, entries, engine=None):
         template="plotly_white",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        margin={"l": 33, "r": 8, "t": 48, "b": 64},
+        margin={"l": 33, "r": 33, "t": 48, "b": 64},
         font={"family": "Inter, system-ui, sans-serif", "size": 11},
         legend={
             "orientation": "h",
@@ -67,6 +67,8 @@ def empty_chart(aircraft_type, engine_id, entries, engine=None):
         dragmode="zoom",
     )
     fig.update_xaxes(
+        # The hidden secondary Y axes need no reserved space on the right.
+        domain=[0, 1],
         type="date",
         tickformat="%d.%m.%y",
         nticks=14,
@@ -97,8 +99,19 @@ def update_time_ticks(fig, start="", end=""):
     ]
     if not bounds:
         return
+    # Keep autorange/reset behavior, with only 1% breathing room at each end.
+    # Include event markers as well as readings so neither gets clipped.
+    data_lo = pd.to_datetime(min(np.nanmin(xs) for _, xs in series if len(xs)), unit="ms")
+    data_hi = pd.to_datetime(max(np.nanmax(xs) for _, xs in series if len(xs)), unit="ms")
+    padding = max((data_hi - data_lo) * 0.01, pd.Timedelta(minutes=1))
+    fig.update_xaxes(
+        autorangeoptions={
+            "clipmin": (data_lo - padding).isoformat(),
+            "clipmax": (data_hi + padding).isoformat(),
+        },
+    )
     # Include any visible event before the readings, ending at the last reading.
-    lo = pd.to_datetime(min(np.nanmin(xs) for _, xs in series if len(xs)), unit="ms")
+    lo = data_lo
     hi = pd.to_datetime(max(b[1] for b in bounds), unit="ms")
     if start:
         lo = max(lo, pd.Timestamp(start))
