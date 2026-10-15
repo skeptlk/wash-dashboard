@@ -85,7 +85,22 @@ def _controls():
                 rx.foreach(
                     State.selected_params,
                     lambda pid: rx.badge(
-                        pid.split("@")[0], title=pid, color_scheme="blue"
+                        pid.split("@")[0],
+                        rx.el.button(
+                            rx.icon("x", size=12),
+                            on_click=State.toggle_param(pid, False),
+                            aria_label="Remove " + pid,
+                            title="Remove " + pid,
+                            type="button",
+                            cursor="pointer",
+                            display="inline-flex",
+                            align_items="center",
+                            padding="2px",
+                            border_radius="2px",
+                            _hover={"background_color": "var(--blue-5)"},
+                        ),
+                        title=pid,
+                        color_scheme="blue",
                     ),
                 ),
                 direction="row",
@@ -130,12 +145,47 @@ def _controls():
     )
 
 
+def _chart_controls():
+    return rx.flex(
+        rx.text("Date range", size="1", color="var(--gray-11)"),
+        *[
+            rx.button(
+                label,
+                on_click=State.set_date_preset(label),
+                variant=rx.cond(State.date_preset == label, "solid", "soft"),
+                aria_pressed=State.date_preset == label,
+                size="1",
+                cursor="pointer",
+            )
+            for label in ("All", "1y", "3mo", "30d")
+        ],
+        rx.tooltip(
+            rx.button(
+                rx.icon("scan-line", size=14),
+                "Scale to trend",
+                on_click=State.scale_to_trend,
+                disabled=~State.has_chart | State.is_computing,
+                variant="soft",
+                size="1",
+                cursor="pointer",
+                margin_left="8px",
+            ),
+            content="Fit Y-axes to smoothed values in the visible date range",
+        ),
+        align="center",
+        wrap="wrap",
+        gap="6px",
+        flex_shrink="0",
+    )
+
+
 def constructor_page():
     return page_shell(
-        "/constructor",
+        "/",
         rx.flex(
             _controls(),
             rx.vstack(
+                _chart_controls(),
                 rx.cond(
                     State.error != "",
                     rx.callout(

@@ -27,12 +27,13 @@ app = rx.App(
     ],
 )
 app.add_middleware(AuthMiddleware(), index=0)
-app.add_page(
-    constructor_page,
-    route="/constructor",
-    title="ECM — Constructor",
-    on_load=[AuthState.require_auth, ConstructorState.on_load],
-)
+for route in ("/", "/constructor"):
+    app.add_page(
+        constructor_page,
+        route=route,
+        title="ECM — Constructor",
+        on_load=[AuthState.require_auth, ConstructorState.on_load],
+    )
 app.add_page(
     login_page,
     route="/login",
@@ -41,7 +42,7 @@ app.add_page(
 )
 app.add_page(
     degradation_page,
-    route="/",
+    route="/degradation",
     title="ECM — Degradation",
     on_load=[AuthState.require_auth, GlobalState.hydrate_prefs, DegradationState.hydrate_prefs],
 )

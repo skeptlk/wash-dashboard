@@ -342,7 +342,8 @@ def test_constructor_switches_families_and_shows_errors(database, monkeypatch):
     asyncio.run(run())
 
 
-def test_constructor_url_roundtrip_and_zoom(database, monkeypatch):
+@pytest.mark.parametrize("route", ["/", "/constructor"])
+def test_constructor_url_roundtrip_and_zoom(database, monkeypatch, route):
     import json
     import shutil
     import subprocess
@@ -389,7 +390,7 @@ def test_constructor_url_roundtrip_and_zoom(database, monkeypatch):
         return subprocess.check_output([node, "-e", script], text=True).strip()
 
     async def run():
-        state = state_at("http://localhost/constructor?" + urlencode(query))
+        state = state_at("http://localhost" + route + "?" + urlencode(query))
         _ = await _settle(state, state.on_load())
         assert not state.error and state.has_chart
         assert state.selected_engine == query["engine"]
@@ -399,7 +400,7 @@ def test_constructor_url_roundtrip_and_zoom(database, monkeypatch):
             query["x_start"],
             query["x_end"],
         ]
-        url = sync_url(state, "http://localhost/constructor?unrelated=keep")
+        url = sync_url(state, "http://localhost" + route + "?unrelated=keep")
         assert parse_qs(urlsplit(url).query) == {
             k: [v] for k, v in {**query, "unrelated": "keep"}.items()
         }

@@ -83,12 +83,38 @@ def empty_chart(aircraft_type, engine_id, entries, engine=None):
     return fig
 
 
-def trace_x_values(trace):
+def _trace_values(values):
     """Plotly restores persisted NumPy arrays as its binary transport dicts."""
-    values = trace.x
     if isinstance(values, dict) and "bdata" in values:
         return np.frombuffer(base64.b64decode(values["bdata"]), dtype=values["dtype"])
     return values if values is not None else ()
+
+
+def trace_x_values(trace):
+    return _trace_values(trace.x)
+
+
+def scale_to_smoothed(fig, start="", end=""):
+    """Fit each primary Y axis to finite, visible trend values with 10% padding."""
+    values_by_axis = {}
+    for trace in fig.data:
+        if trace.legendgroup != "smooth":
+            continue
+        xs = np.asarray(trace_x_values(trace), dtype=float)
+        ys = np.asarray(_trace_values(trace.y), dtype=float)
+        visible = np.isfinite(xs) & np.isfinite(ys)
+        if start:
+            visible &= xs >= pd.Timestamp(start).value / 1e6
+        if end:
+            visible &= xs <= pd.Timestamp(end).value / 1e6
+        if visible.any():
+            axis = "yaxis" + (trace.yaxis or "y")[1:]
+            values_by_axis.setdefault(axis, []).append(ys[visible])
+    for axis, parts in values_by_axis.items():
+        values = np.concatenate(parts)
+        lo, hi = float(values.min()), float(values.max())
+        padding = (hi - lo) * 0.1 if hi > lo else max(abs(lo) * 0.05, 0.1)
+        fig.layout[axis].update(range=[lo - padding, hi + padding], autorange=False)
 
 
 def update_time_ticks(fig, start="", end=""):

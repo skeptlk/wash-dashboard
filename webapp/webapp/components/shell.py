@@ -8,8 +8,8 @@ from ..state.auth import AuthState
 
 
 _NAV_ITEMS = [
-    ("Constructor", "/constructor", "chart-no-axes-combined"),
-    ("Degradation", "/", "trending-down"),
+    ("Constructor", "/", "chart-no-axes-combined"),
+    ("Degradation", "/degradation", "trending-down"),
     ("Wash Analysis", "/analysis", "droplets"),
     ("Wash Schedule", "/schedule", "calendar"),
     ("EGT Indication", "/egt", "thermometer_sun"),

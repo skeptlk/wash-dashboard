@@ -8,6 +8,7 @@ import math
 import re
 from urllib.parse import parse_qsl
 
+import pandas as pd
 import plotly.graph_objects as go
 import reflex as rx
 
@@ -16,6 +17,7 @@ from ..components.constructor_fig import (
     add_series,
     copy_series,
     empty_chart,
+    scale_to_smoothed,
     update_time_ticks,
     trace_x_values,
 )
@@ -23,6 +25,18 @@ from ..data import flight_db
 from ..data.egt_params import DEFAULT_PARAMS
 
 logger = logging.getLogger(__name__)
+
+
+def _preset_dates(preset: str) -> tuple[str, str]:
+    if preset == "All":
+        return "", ""
+    today = pd.Timestamp(date.today())
+    offset = {
+        "1y": pd.DateOffset(years=1),
+        "3mo": pd.DateOffset(months=3),
+        "30d": pd.Timedelta(days=30),
+    }[preset]
+    return (today - offset).date().isoformat(), today.date().isoformat()
 
 
 class ConstructorState(rx.State):
@@ -66,6 +80,16 @@ class ConstructorState(rx.State):
     @rx.var
     def chart_height(self) -> str:
         return "100%" if self.chart_rows <= 3 else f"{self.chart_rows * 180 + 150}px"
+
+    @rx.var
+    def date_preset(self) -> str:
+        if self.timeline_start:
+            return ""
+        return next(
+            (preset for preset in ("All", "1y", "3mo", "30d")
+             if (self.start_date, self.end_date) == _preset_dates(preset)),
+            "",
+        )
 
     async def _refresh(self):
         self.error = ""
@@ -393,6 +417,24 @@ class ConstructorState(rx.State):
             yield update
 
     @rx.event
+    async def set_date_preset(self, preset: str):
+        if preset not in ("All", "1y", "3mo", "30d"):
+            return
+        self.start_date, self.end_date = _preset_dates(preset)
+        self.timeline_start = self.timeline_end = ""
+        async for update in self._refresh():
+            yield update
+
+    @rx.event
+    def scale_to_trend(self):
+        if not self.has_chart or self.is_computing:
+            return
+        scale_to_smoothed(self._chart_figure, self.timeline_start, self.timeline_end)
+        # Preserve loaded traces and the X viewport, sending only the new axes.
+        self.chart_offset = len(self._chart_figure.data)
+        self.chart_figure = go.Figure(layout=self._chart_figure.layout)
+
+    @rx.event
     async def set_start_date(self, value: str):
         if not self._valid_date(value):
             return
@@ -470,7 +512,7 @@ class ConstructorState(rx.State):
         )
         return rx.call_script(
             "(() => { const url = new URL(window.location.href);"
-            "if (url.pathname.replace(/\\/$/, '') !== '/constructor') return;"
+            "if (!['', '/constructor'].includes(url.pathname.replace(/\\/$/, ''))) return;"
             f"for (const [key, value] of Object.entries({params})) {{"
             "if (value || ['start', 'end', 'params'].includes(key)) url.searchParams.set(key, value);"
             "else url.searchParams.delete(key);"

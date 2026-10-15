@@ -212,7 +212,7 @@ def _results_panel() -> rx.Component:
 
 def degradation_page() -> rx.Component:
     return page_shell(
-        "/",
+        "/degradation",
         rx.vstack(
             rx.hstack(
                 _control_panel(),

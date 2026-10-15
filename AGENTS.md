@@ -68,11 +68,11 @@ dvc pull
 
 | Route | Page | Purpose |
 | --- | --- | --- |
-| `/` | Degradation | Engine parameter trends, fleet rankings, lifetime and utilization-based degradation |
+| `/degradation` | Degradation | Engine parameter trends, fleet rankings, lifetime and utilization-based degradation |
 | `/analysis` | Wash Analysis | Before/after wash effects, per-engine charts, and effectiveness summaries |
 | `/schedule` | Wash Schedule | Wash/maintenance timeline with aircraft and ATA filters |
 | `/egt` | EGT Indication | B737 parameter traces, installation/removal and maintenance markers, failure predictions, and dataset labeling |
-| `/constructor` | Constructor | DuckDB-backed parameter trends for B737, A320 and E170 with engine installation/removal markers |
+| `/` (also `/constructor`) | Constructor | Default page: DuckDB-backed parameter trends for B737, A320 and E170 with engine installation/removal markers |
 | `/login` | Sign In | Shared dashboard authentication |
 
 These pages are implemented; Wash Analysis and Wash Schedule are not stubs.
