@@ -95,7 +95,7 @@ def trace_x_values(trace):
 
 
 def scale_to_smoothed(fig, start="", end=""):
-    """Fit each primary Y axis to finite, visible trend values with 10% padding."""
+    """Fit each primary Y axis to finite, visible trend values with 30% padding."""
     values_by_axis = {}
     for trace in fig.data:
         if trace.legendgroup != "smooth":
@@ -113,7 +113,7 @@ def scale_to_smoothed(fig, start="", end=""):
     for axis, parts in values_by_axis.items():
         values = np.concatenate(parts)
         lo, hi = float(values.min()), float(values.max())
-        padding = (hi - lo) * 0.1 if hi > lo else max(abs(lo) * 0.05, 0.1)
+        padding = (hi - lo) * 0.3 if hi > lo else max(abs(lo) * 0.05, 0.1)
         fig.layout[axis].update(range=[lo - padding, hi + padding], autorange=False)
 
 

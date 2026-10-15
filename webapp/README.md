@@ -83,9 +83,10 @@ The other dashboard pages continue using their existing loaders.
 
 Selected parameter badges have a remove button that also unchecks the parameter.
 Above the chart, All clears both date bounds; 1y, 3mo and 30d select the last
-calendar year, three calendar months or 30 days through today. Scale to trend
+calendar year, three calendar months or 30 days through today. Scale
 fits each Y-axis to finite smoothed values within the visible date window with
-padding. Raw readings remain plotted, so outliers can fall outside these bounds.
+30% padding on each side of the trend range. Raw readings remain plotted, so
+outliers can fall outside these bounds.
 Plotly's standard autoscale restores scaling over all values.
 
 Parameters load progressively in selection order, within one chart with shared

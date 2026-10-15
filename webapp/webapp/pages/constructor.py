@@ -147,7 +147,6 @@ def _controls():
 
 def _chart_controls():
     return rx.flex(
-        rx.text("Date range", size="1", color="var(--gray-11)"),
         *[
             rx.button(
                 label,
@@ -162,7 +161,7 @@ def _chart_controls():
         rx.tooltip(
             rx.button(
                 rx.icon("scan-line", size=14),
-                "Scale to trend",
+                "Scale",
                 on_click=State.scale_to_trend,
                 disabled=~State.has_chart | State.is_computing,
                 variant="soft",

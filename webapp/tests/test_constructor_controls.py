@@ -40,7 +40,7 @@ def test_scale_to_trend_ignores_outliers_and_respects_viewport(persisted):
     state._apply_timeline()
     before = state._chart_figure.to_json()
     state.scale_to_trend()
-    assert state.chart_figure.layout.yaxis.range == pytest.approx((-6.1, -4.9))
+    assert state.chart_figure.layout.yaxis.range == pytest.approx((-6.3, -4.7))
     assert state.chart_figure.layout.yaxis3.range == (19, 21)
     # Empty visible trend leaves its previous bounds; event axes stay fixed.
     assert state.chart_figure.layout.yaxis5.range == (-50, 50)
